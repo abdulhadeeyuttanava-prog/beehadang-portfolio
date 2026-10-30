@@ -276,6 +276,19 @@ async function importStarter(j) {
   toast(`นำเข้าแล้ว ${added} รายการ${skipped ? ` (ข้าม ${skipped} ที่เคยนำเข้าแล้ว)` : ''}`);
 }
 
+// "account,symbol,qty,price[,currency]" per line → starter rows dated today.
+function parsePasted(text) {
+  const txns = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map((l, i) => {
+    const [account, symbol, qty, price, currency = 'THB'] = l.split(',').map(x => x.trim());
+    const q = Number(qty), p = Number(price);
+    if (!account || !symbol || !(q > 0) || !(p >= 0)) throw new Error(`บรรทัด ${i + 1}`);
+    const sym = symbol.toUpperCase(), cur = currency.toUpperCase();
+    return { date: today(), account, symbol: sym, qty: q, price: p, currency: cur, fx: fxNow(cur),
+      assetType: sym === 'DEPOSIT' ? 'cash' : undefined, marketPrice: p, reason: 'ยอดยกมา (วางจากข้อความ)' };
+  });
+  return { starter: 1, title: 'ข้อความที่วาง', txns };
+}
+
 // ---------- views ----------
 let tab = 'overview';
 
@@ -432,6 +445,10 @@ function settingsView() {
     ${S.lastBackup ? '<br>สำรองล่าสุด ' + new Date(S.lastBackup).toLocaleString('th-TH') : ''}</p>
     <div class="actions" style="justify-content:flex-start"><button id="backupBtn">สำรองข้อมูล</button><button id="restoreBtn" class="ghost">กู้คืน / นำเข้าไฟล์</button></div>
     <input type="file" id="restoreFile" accept=".json,application/json" hidden></div>
+  <div class="card"><h2>วางข้อมูล</h2>
+    <p class="muted">วางข้อความที่ได้จาก Claude แล้วกดนำเข้า บรรทัดละรายการ: บัญชี,สัญลักษณ์,จำนวน,ราคาต่อหน่วย[,สกุลเงิน]</p>
+    <textarea id="pasteBox" rows="5" placeholder="Bitazza,ETH,0.6806,75178.13"></textarea>
+    <div class="actions" style="justify-content:flex-start"><button id="pasteBtn">นำเข้าจากข้อความ</button></div></div>
   <div class="card"><h2>พอร์ตเป้าหมาย (%)</h2>
     <div class="grid2">${Object.keys(T).map(k => `<div><label>${TYPES[k]}</label><input type="number" data-target="${k}" value="${T[k]}"></div>`).join('')}</div>
     <div class="grid2"><div><label>แจ้งเตือนเมื่อห่างเกิน (±%)</label><input type="number" id="band" value="${st.band}"></div>
@@ -641,6 +658,14 @@ function bindView() {
     };
     $('#backupBtn').onclick = () => passForm('สำรองข้อมูลแบบเข้ารหัส', async p => { await exportBackup(p); render(); toast('สำรองแล้ว'); });
     $('#restoreBtn').onclick = () => $('#restoreFile').click();
+    $('#pasteBtn').onclick = () => {
+      const text = $('#pasteBox').value.trim();
+      if (!text) return toast('ยังไม่ได้วางข้อความ');
+      try {
+        if (text.startsWith('{')) return importStarter(JSON.parse(text));
+        importStarter(parsePasted(text));
+      } catch (e) { toast('อ่านข้อความไม่ได้: ' + e.message); }
+    };
     $('#restoreFile').onchange = async e => {
       const file = e.target.files[0]; if (!file) return;
       e.target.value = '';

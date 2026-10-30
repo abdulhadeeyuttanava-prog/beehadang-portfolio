@@ -632,7 +632,7 @@ function settingsView() {
     <input type="file" id="restoreFile" accept=".json,application/json" hidden></div>
   <div class="card"><h2>วางข้อมูล</h2>
     <p class="muted">วางข้อความที่ได้จาก Claude แล้วกดนำเข้า แอปจะสรุปให้ดูก่อนว่าจะเพิ่มหรือแทนอะไร วางซ้ำได้โดยไม่เกิดรายการซ้ำ</p>
-    <textarea id="pasteBox" rows="5" placeholder="Bitazza,ETH,0.6806,75178.13"></textarea>
+    <textarea id="pasteBox" rows="5" placeholder="2026-01-15,Dime,SPUS,1,60.00,USD,33.5"></textarea>
     <div class="actions" style="justify-content:flex-start"><button id="pasteBtn">นำเข้าจากข้อความ</button>${S.undo ? `<button id="undoBtn" class="ghost">ย้อนการนำเข้าล่าสุด</button>` : ''}</div></div>
   <div class="card"><h2>พอร์ตเป้าหมาย (%)</h2>
     <div class="grid2">${Object.keys(T).map(k => `<div><label>${TYPES[k]}</label><input type="number" data-target="${k}" value="${T[k]}"></div>`).join('')}</div>

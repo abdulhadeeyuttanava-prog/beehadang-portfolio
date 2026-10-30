@@ -64,14 +64,14 @@ function defaultState() {
   };
 }
 
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 let S;
 
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 2) => Number.isFinite(n) ? n.toLocaleString('th-TH', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–';
-const baht = n => fmt(Math.abs(n) < 0.5 ? 0 : n, 0) + ' ฿';
+const baht = n => S?.settings?.hide ? '•••• ฿' : fmt(Math.abs(n) < 0.5 ? 0 : n, 0) + ' ฿';
 const px = n => fmt(n, n != null && Math.abs(n) < 1 ? 6 : 2);
 const pct = n => Number.isFinite(n) ? (n >= 0 ? '+' : '') + fmt(n * 100, 2) + '%' : '–';
 const cls = n => n > 0 ? 'good' : n < 0 ? 'bad' : '';
@@ -172,6 +172,28 @@ function allocation(holdings) {
 }
 
 // Split a monthly amount across under-weight groups so the mix moves toward the target without selling.
+// Within one group, split money across assets that have a group target, toward those targets.
+function splitInGroup(type, amount, hs) {
+  const members = S.assets.filter(a => a.type === type && a.groupTarget > 0);
+  if (!members.length || amount <= 0) return [];
+  const tw = members.reduce((s, a) => s + a.groupTarget, 0);
+  const val = id => hs.filter(h => h.assetId === id).reduce((s, h) => s + (h.valueThb || 0), 0);
+  const groupNow = members.reduce((s, a) => s + val(a.id), 0), groupNew = groupNow + amount;
+  const gaps = members.map(a => Math.max(0, groupNew * a.groupTarget / tw - val(a.id)));
+  const gs = gaps.reduce((s, g) => s + g, 0);
+  return members.map((a, i) => ({ asset: a, amount: gs ? amount * gaps[i] / gs : amount * a.groupTarget / tw })).filter(x => x.amount >= 1);
+}
+
+// Months of DCA (no selling, prices flat) until no group is above its target.
+function monthsToTarget(monthly, alloc) {
+  const T = S.settings.targets;
+  if (!(monthly > 0) || !alloc.total) return null;
+  let need = alloc.total;
+  for (const k of Object.keys(T)) if (T[k] > 0 && alloc.by[k] > 0) need = Math.max(need, alloc.by[k] / (T[k] / 100));
+  for (const k of Object.keys(T)) if (T[k] === 0 && alloc.by[k] > 1) return null;
+  return Math.ceil((need - alloc.total) / monthly);
+}
+
 function dcaSuggestion(amount, alloc) {
   const T = S.settings.targets, newTotal = alloc.total + amount;
   const gaps = {};
@@ -340,7 +362,14 @@ function alertsHtml(hs, alloc) {
     if (!done && d.getDate() >= p.day)
       out.push(item('📅', 'info', `ถึงรอบ DCA <b>${esc(asset(p.assetId)?.symbol)}</b><div class="sub">${fmt(p.amount, 0)} ${p.currency}</div>`, `<button class="small" data-dca="${p.id}">บันทึก</button>`));
   }
-  if (S.dirty && S.txns.length) out.push(item('💾', 'info', 'มีข้อมูลใหม่ที่ยังไม่ได้สำรอง', `<button class="small ghost" data-go="settings">สำรอง</button>`));
+  const backupAge = S.lastBackup ? (Date.now() - new Date(S.lastBackup)) / 864e5 : Infinity;
+  if (S.txns.length && (S.dirty || backupAge > 7))
+    out.push(item('💾', 'info', `${S.lastBackup ? `สำรองล่าสุด ${Math.floor(backupAge)} วันก่อน` : 'ยังไม่เคยสำรองข้อมูล'}<div class="sub">ถ้ามือถือหาย ข้อมูลจะหายทั้งหมด</div>`, `<button class="small ghost" data-go="settings">สำรอง</button>`));
+  const held = hs.filter(h => h.qty > 1e-12 && h.asset.priceSource !== 'fixed');
+  const stale = held.filter(h => !S.prices[h.assetId]?.at || Date.now() - new Date(S.prices[h.assetId].at) > 2 * 864e5).map(h => h.asset.symbol);
+  if (held.some(h => h.asset.priceSource === 'finnhub') && !S.settings.finnhubKey)
+    out.push(item('🔑', 'warn', 'หุ้นยังไม่อัปเดตราคาอัตโนมัติ<div class="sub">ใส่คีย์ Finnhub ฟรีในหน้าตั้งค่า</div>', `<button class="small ghost" data-go="settings">ตั้งค่า</button>`));
+  else if (stale.length) out.push(item('⏱️', 'warn', `ราคาเก่าเกิน 2 วัน: ${esc(stale.join(', '))}<div class="sub">กด ↻ ราคา เพื่ออัปเดต</div>`));
   const due = S.txns.filter(t => t.reviewDate && t.reviewDate <= today() && !t.reviewed);
   if (due.length) out.push(item('📝', 'info', `มี ${due.length} บันทึกถึงวันทบทวน`, `<button class="small ghost" data-go="journal">ดู</button>`));
   return out.length ? `<section class="card"><h2>สิ่งที่ต้องดู <span class="count">${out.length}</span></h2>${out.join('')}</section>` : '';
@@ -366,6 +395,31 @@ function donut(alloc) {
     <text x="70" y="84" text-anchor="middle" class="d2">กลุ่มสินทรัพย์</text></svg>`;
 }
 
+// One point per day: market value and money put in (cost basis).
+function snapshot(value, cost) {
+  if (!(value > 0)) return;
+  S.history ??= {};
+  const d = today(), prev = S.history[d];
+  if (!prev || Math.abs(prev.v - value) > 0.5 || Math.abs(prev.c - cost) > 0.5) { S.history[d] = { v: Math.round(value), c: Math.round(cost) }; saveState(); }
+}
+
+function historyChart() {
+  const pts = Object.entries(S.history || {}).sort(([a], [b]) => a.localeCompare(b));
+  if (pts.length < 2) return `<div class="muted">กราฟจะเริ่มแสดงหลังเปิดแอปครบ 2 วัน (บันทึกมูลค่าวันละครั้งอัตโนมัติ)</div>`;
+  const W = 320, H = 120, P = 4;
+  const t0 = new Date(pts[0][0]).getTime(), t1 = new Date(pts.at(-1)[0]).getTime() || t0 + 1;
+  const vals = pts.flatMap(([, p]) => [p.v, p.c]), lo = Math.min(...vals) * 0.97, hi = Math.max(...vals) * 1.03;
+  const x = d => P + (new Date(d).getTime() - t0) / (t1 - t0 || 1) * (W - 2 * P);
+  const y = v => H - P - (v - lo) / (hi - lo || 1) * (H - 2 * P);
+  const line = k => pts.map(([d, p], i) => `${i ? 'L' : 'M'}${x(d).toFixed(1)},${y(p[k]).toFixed(1)}`).join('');
+  const area = line('v') + `L${x(pts.at(-1)[0]).toFixed(1)},${H}L${x(pts[0][0]).toFixed(1)},${H}Z`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="hist" preserveAspectRatio="none">
+    <defs><linearGradient id="hg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8b5cf6" stop-opacity=".45"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></linearGradient></defs>
+    <path d="${area}" fill="url(#hg)"/><path d="${line('c')}" fill="none" stroke="#8b95b0" stroke-width="1.5" stroke-dasharray="4 4"/>
+    <path d="${line('v')}" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linejoin="round"/></svg>
+    <div class="hist-leg"><span><i style="background:#a78bfa"></i>มูลค่าพอร์ต</span><span><i class="dash"></i>เงินที่ใส่</span><span class="muted">${pts[0][0]} → ${pts.at(-1)[0]}</span></div>`;
+}
+
 function overview() {
   if (!S.txns.length) return `<section class="hero"><div class="label">มูลค่าพอร์ต</div><div class="total">0 ฿</div>
     <div class="hero-sub">เริ่มต้นด้วยการกด ＋ หรือวางข้อมูลในหน้าตั้งค่า</div></section>` + alertsHtml([], { total: 0 });
@@ -376,6 +430,7 @@ function overview() {
   const income = hs.reduce((s, h) => s + h.incomeThb, 0);
   const irr = xirr(portfolioFlows(hs));
   const missing = hs.filter(h => h.qty > 0 && h.price == null).map(h => h.asset.symbol);
+  if (!missing.length) snapshot(alloc.total, cost);
   const T = S.settings.targets;
   const legend = Object.keys(T).filter(k => T[k] > 0 || alloc.by[k] > 0).map(k => {
     const cur = alloc.total ? alloc.by[k] / alloc.total * 100 : 0, diff = cur - T[k];
@@ -388,16 +443,17 @@ function overview() {
     <div class="r"><b>${baht(h.valueThb)}</b><div class="${cls(h.unrealThb)} small-t">${pct(h.unrealPct)}</div></div></div>`).join('');
   return `
   <section class="hero">
-    <div class="label">มูลค่าพอร์ตทั้งหมด</div>
+    <div class="label">มูลค่าพอร์ตทั้งหมด <button class="eye" id="eyeBtn" aria-label="ซ่อน/แสดงตัวเลข">${S.settings.hide ? '🙈' : '👁'}</button></div>
     <div class="total">${baht(alloc.total)}</div>
-    <div class="hero-pills">${pill(unreal, `${unreal >= 0 ? '+' : ''}${fmt(unreal, 0)} ฿ · ${pct(cost ? unreal / cost : null)}`)}</div>
+    <div class="hero-pills">${pill(unreal, `${S.settings.hide ? '••••' : (unreal >= 0 ? '+' : '') + fmt(unreal, 0)} ฿ · ${pct(cost ? unreal / cost : null)}`)}</div>
     <div class="hero-sub">ต้นทุน ${baht(cost)} · USD ${fmt(S.fx.USD, 2)} ฿${S.lastRefresh ? ' · ' + new Date(S.lastRefresh).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : ''}</div>
     ${missing.length ? `<div class="hero-warn">ยังไม่มีราคา: ${esc(missing.join(', '))}</div>` : ''}
   </section>
+  <section class="card"><h2>การเติบโตของพอร์ต</h2>${historyChart()}</section>
   <div class="tiles">
     <div class="tile"><span>XIRR ต่อปี</span><b class="${cls(irr)}">${pct(irr)}</b><small>${irr == null ? 'รอข้อมูล 3 เดือน' : 'ตามจังหวะเงินเข้า'}</small></div>
     <div class="tile"><span>ปันผลสุทธิ</span><b class="good">${baht(income)}</b><small>รวมทั้งหมด</small></div>
-    <div class="tile"><span>กำไรที่ขายแล้ว</span><b class="${cls(realized)}">${baht(realized)}</b><small>realized</small></div>
+    <div class="tile"><span>กำไรที่ขายแล้ว</span><b class="${cls(realized)}">${baht(realized)}</b><small>รวมทั้งหมด</small></div>
   </div>
   ${alertsHtml(hs, alloc)}
   <section class="card"><h2>สัดส่วนเทียบเป้าหมาย</h2>
@@ -412,9 +468,10 @@ function overview() {
 }
 
 function retirementHtml(total) {
-  const r = S.settings.retire || { age: 28, retireAge: 55, monthlyIncome: 50000, yield: 4, ret: 7 };
+  const r = { age: 28, retireAge: 55, monthlyIncome: 50000, yield: 4, ret: 7, infl: 2, ...S.settings.retire };
   const n = (r.retireAge - r.age) * 12, i = r.ret / 100 / 12;
-  const need = r.monthlyIncome * 12 / (r.yield / 100);
+  const futureIncome = r.monthlyIncome * Math.pow(1 + r.infl / 100, r.retireAge - r.age);
+  const need = futureIncome * 12 / (r.yield / 100);
   const fvNow = total * Math.pow(1 + i, n);
   const factor = i ? (Math.pow(1 + i, n) - 1) / i : n;
   const monthly = n > 0 ? Math.max(0, (need - fvNow) / factor) : 0;
@@ -422,7 +479,7 @@ function retirementHtml(total) {
   return `<section class="card retire"><h2>เป้าเกษียณ · อายุ ${r.retireAge}</h2>
     <div class="ret-top"><div><small>เป้าหมาย</small><b>${baht(need)}</b></div><div class="r"><small>ต้องลงเพิ่ม/เดือน</small><b class="accent">${baht(monthly)}</b></div></div>
     <div class="progress"><i style="width:${Math.max(prog, 1)}%"></i></div>
-    <div class="muted">ตอนนี้ ${fmt(prog, 2)}% ของเป้า · ปันผล ${baht(r.monthlyIncome)}/เดือน ที่ yield ${r.yield}% · ผลตอบแทนคาด ${r.ret}%/ปี (ยังไม่คิดเงินเฟ้อ)</div></section>`;
+    <div class="muted">ตอนนี้ ${fmt(prog, 2)}% ของเป้า · ปันผล ${baht(r.monthlyIncome)}/เดือนในค่าเงินวันนี้ = ${baht(futureIncome)}/เดือนตอนอายุ ${r.retireAge} (เงินเฟ้อ ${r.infl}%) · yield ${r.yield}% · ผลตอบแทนคาด ${r.ret}%/ปี</div></section>`;
 }
 
 function holdingsView() {
@@ -488,7 +545,7 @@ function journal() {
 }
 
 function settingsView() {
-  const st = S.settings, T = st.targets, r = st.retire || { age: 28, retireAge: 55, monthlyIncome: 50000, yield: 4, ret: 7 };
+  const st = S.settings, T = st.targets, r = { age: 28, retireAge: 55, monthlyIncome: 50000, yield: 4, ret: 7, infl: 2, ...st.retire };
   return `
   <div class="card"><h2>สำรองข้อมูล</h2>
     <p class="muted">ข้อมูลอยู่ในเครื่องนี้เท่านั้น ถ้าลบแอปหรือล้างเบราว์เซอร์ ข้อมูลจะหาย ให้สำรองไฟล์เข้ารหัสไว้ใน iCloud/Google Drive ของคุณเป็นประจำ
@@ -508,7 +565,8 @@ function settingsView() {
     <div><label>อายุเกษียณ</label><input type="number" data-ret="retireAge" value="${r.retireAge}"></div>
     <div><label>ปันผลที่ต้องการ/เดือน (บาท)</label><input type="number" data-ret="monthlyIncome" value="${r.monthlyIncome}"></div>
     <div><label>อัตราปันผลตอนเกษียณ (%)</label><input type="number" data-ret="yield" value="${r.yield}"></div>
-    <div><label>ผลตอบแทนเฉลี่ยที่คาด (%/ปี)</label><input type="number" data-ret="ret" value="${r.ret}"></div></div></div>
+    <div><label>ผลตอบแทนเฉลี่ยที่คาด (%/ปี)</label><input type="number" data-ret="ret" value="${r.ret}"></div>
+    <div><label>เงินเฟ้อ (%/ปี)</label><input type="number" step="any" data-ret="infl" value="${r.infl ?? 2}"></div></div></div>
   <div class="card"><h2>ราคาอัตโนมัติ</h2>
     <label>คีย์ Finnhub (ฟรี สำหรับราคาหุ้นสหรัฐ)</label><input id="finnhub" value="${esc(st.finnhubKey)}" placeholder="วางคีย์ที่นี่">
     <p class="muted">สมัครฟรีที่ finnhub.io แล้วคัดลอก API key มาวาง คริปโตใช้ CoinGecko และค่าเงินใช้ open.er-api ไม่ต้องใช้คีย์</p></div>
@@ -545,6 +603,7 @@ function txnForm(t = {}, preset = {}) {
     <div class="grid2"><div><label>วันที่</label><input type="date" name="date" value="${t.date}" required></div>
       <div><label>บัญชี</label><select name="accountId">${opts(S.accounts, t.accountId)}</select></div></div>
     <label>สินทรัพย์</label><select name="assetId" id="fAsset">${opts(S.assets, t.assetId, a => `${a.symbol} · ${TYPES[a.type]}`)}</select>
+    <div id="payField"><label>ยอดเงินที่จ่าย (ไม่รวมค่าธรรมเนียม)</label><input id="fPay" type="number" step="any" inputmode="decimal" placeholder="เช่น 1000" value="${t.qty && t.price ? +(t.qty * t.price).toFixed(2) : ''}"></div>
     <div id="qtyFields" class="grid2"><div><label>จำนวนหน่วย</label><input name="qty" type="number" step="any" inputmode="decimal" value="${t.qty ?? ''}"></div>
       <div><label>ราคาต่อหน่วย</label><input name="price" type="number" step="any" inputmode="decimal" value="${t.price ?? ''}"></div></div>
     <div id="amtFields"><label>จำนวนเงิน</label><input name="amount" type="number" step="any" inputmode="decimal" value="${t.amount ?? ''}"></div>
@@ -552,7 +611,7 @@ function txnForm(t = {}, preset = {}) {
       <div><label>อัตรา 1 หน่วย = ? บาท</label><input name="fx" id="fFx" type="number" step="any" value="${t.fx}"></div></div>
     <div class="grid2"><div><label>ค่าธรรมเนียม</label><input name="fee" type="number" step="any" value="${t.fee ?? ''}"></div>
       <div><label>ภาษีหัก ณ ที่จ่าย</label><input name="tax" type="number" step="any" value="${t.tax ?? ''}"></div></div>
-    <p class="muted" id="buyHint">ถ้ารู้แค่ยอดเงินที่ DCA ใส่จำนวนเงินในช่องราคา × จำนวนหน่วยตามที่แอปโบรกเกอร์แสดง</p>
+    <p class="muted" id="buyHint">ใส่ยอดเงินกับราคา แอปจะคำนวณจำนวนหน่วยให้ (หรือใส่จำนวนหน่วยตามแอปโบรกเกอร์เพื่อความแม่นยำ)</p>
     <details ${t.reason ? 'open' : ''}><summary>บันทึกเหตุผล (ไม่บังคับ)</summary>
       <label>ทำไมถึงซื้อ/ขาย</label><textarea name="reason" rows="3">${esc(t.reason || '')}</textarea>
       <label>จะเปลี่ยนใจเมื่อ</label><input name="exitPlan" value="${esc(t.exitPlan || '')}">
@@ -580,15 +639,38 @@ function txnForm(t = {}, preset = {}) {
   });
   const sync = () => {
     const ty = $('#fType').value, trade = ty === 'buy' || ty === 'sell';
-    $('#qtyFields').hidden = !trade; $('#amtFields').hidden = trade; $('#buyHint').hidden = ty !== 'buy';
+    $('#qtyFields').hidden = !trade; $('#payField').hidden = !trade; $('#amtFields').hidden = trade; $('#buyHint').hidden = ty !== 'buy';
   };
+  const f = $('#modalForm');
+  const calcQty = () => {
+    const pay = Number($('#fPay').value), pr = Number(f.price.value);
+    if (pay > 0 && pr > 0) f.qty.value = +(pay / pr).toFixed(8);
+  };
+  $('#fPay').oninput = calcQty;
+  f.price.oninput = () => { if ($('#fPay').value) calcQty(); };
+  f.qty.oninput = () => { const pr = Number(f.price.value); if (pr > 0) $('#fPay').value = +(Number(f.qty.value) * pr).toFixed(2); };
+  // Prefill the latest price, converted to the paying currency.
+  const prefillPrice = () => {
+    const a = asset($('#fAsset').value), mp = a && priceOf(a);
+    if (!isNew || mp == null || f.price.value) return;
+    const payFx = Number($('#fFx').value) || 1;
+    f.price.value = +(mp * fxNow(a.currency) / payFx).toFixed(a.currency === 'USD' ? 4 : 6);
+  };
+  // US dividends are usually taxed 15% at source.
+  f.amount.oninput = () => {
+    const a = asset($('#fAsset').value);
+    if ($('#fType').value === 'dividend' && a?.currency === 'USD' && !f.tax.dataset.touched)
+      f.tax.value = f.amount.value ? +(Number(f.amount.value) * 0.15).toFixed(2) : '';
+  };
+  f.tax.oninput = () => { f.tax.dataset.touched = '1'; };
   $('#fType').onchange = sync; sync();
   $('#fCur').onchange = () => { $('#fFx').value = $('#fCur').value === 'USD' ? S.fx.USD : 1; };
   $('#fAsset').onchange = () => {
     const a = asset($('#fAsset').value);
-    if (a && isNew) { $('#fCur').value = a.currency; $('#fFx').value = fxNow(a.currency); }
+    if (a && isNew) { $('#fCur').value = a.currency; $('#fFx').value = fxNow(a.currency); f.price.value = ''; prefillPrice(); calcQty(); }
   };
   if (isNew && !preset.currency) $('#fAsset').onchange();
+  else prefillPrice();
 }
 
 function assetForm(a = {}) {
@@ -608,6 +690,7 @@ function assetForm(a = {}) {
     <label>CoinGecko id (ถ้าเป็นคริปโต)</label><input name="coingeckoId" value="${esc(a.coingeckoId || '')}">
     <div class="grid2"><div><label>ประเทศ</label><input name="country" value="${esc(a.country || '')}"></div>
       <div><label>อุตสาหกรรม</label><input name="sector" value="${esc(a.sector || '')}"></div></div>
+    <label>เป้าในกลุ่ม ${TYPES[a.type]} (%) — ใช้แนะนำ DCA รายตัว</label><input name="groupTarget" type="number" step="any" value="${a.groupTarget ?? ''}" placeholder="เว้นว่าง = ไม่ DCA ตัวนี้">
     <label>ราคาล่าสุด (ใส่เองได้)</label><input name="manualPrice" type="number" step="any" value="${p ?? ''}">
     <div class="actions">${isNew ? '' : '<button value="delete" class="danger" formnovalidate>ลบ</button>'}
       <button value="cancel" class="ghost" formnovalidate>ยกเลิก</button><button value="save">บันทึก</button></div>`,
@@ -619,6 +702,7 @@ function assetForm(a = {}) {
       const rec = { ...a, id: a.id || uid() };
       for (const k of ['symbol', 'name', 'type', 'currency', 'priceSource', 'coingeckoId', 'country', 'sector']) rec[k] = String(fd.get(k) || '').trim();
       rec.symbol = rec.symbol.toUpperCase();
+      rec.groupTarget = fd.get('groupTarget') === '' ? undefined : Number(fd.get('groupTarget'));
       if (!rec.coingeckoId && rec.type === 'crypto') rec.coingeckoId = COINGECKO[rec.symbol] || '';
       S.assets = S.assets.filter(x => x.id !== rec.id).concat(rec);
       const mp = fd.get('manualPrice');
@@ -677,13 +761,19 @@ function bindView() {
   });
   v.querySelectorAll('[data-deldca]').forEach(b => b.onclick = async () => { S.dca = S.dca.filter(x => x.id !== b.dataset.deldca); await saveState(); render(); });
 
+  const eye = $('#eyeBtn');
+  if (eye) eye.onclick = async () => { S.settings.hide = !S.settings.hide; await saveState(); render(); };
   const amt = $('#dcaAmt');
   if (amt) {
     const show = () => {
-      const n = Number(amt.value) || 0, s = dcaSuggestion(n, allocation(computeHoldings()));
+      const hs = computeHoldings(), al = allocation(hs);
+      const n = Number(amt.value) || 0, s = dcaSuggestion(n, al), m = monthsToTarget(n, al);
       $('#dcaOut').innerHTML = Object.keys(s).filter(k => s[k] >= 1).map(k => `<div class="split"><span class="dot" style="background:${COLORS[k]}"></span><span class="grow">${TYPES[k]}</span><b>${baht(s[k])}</b></div>
-        <div class="wbar"><i style="width:${n ? s[k] / n * 100 : 0}%;background:${COLORS[k]}"></i></div>`).join('')
-        + '<div class="muted">แบ่งให้กลุ่มที่ต่ำกว่าเป้าก่อน ไม่ต้องขายของเดิม</div>';
+        <div class="wbar"><i style="width:${n ? s[k] / n * 100 : 0}%;background:${COLORS[k]}"></i></div>
+        ${splitInGroup(k, s[k], hs).map(x => `<div class="split sub-split">${avatar(x.asset.symbol)}<span class="grow">${esc(x.asset.symbol)}</span><b>${baht(x.amount)}</b></div>`).join('')}`).join('')
+        + (Object.keys(s).some(k => s[k] >= 1 && !splitInGroup(k, s[k], hs).length) ? '<div class="muted">อยากให้แนะนำรายตัว: แตะสินทรัพย์ในหน้าสินทรัพย์แล้วใส่ "เป้าในกลุ่ม"</div>' : '')
+        + (m != null ? `<div class="eta">${m === 0 ? 'สัดส่วนอยู่ในเป้าแล้ว' : `DCA เดือนละ ${baht(n)} จะถึงเป้าสัดส่วนในราว <b>${m} เดือน</b>`}</div>` : '')
+        + '<div class="muted">แบ่งให้กลุ่มที่ต่ำกว่าเป้าก่อน ไม่ต้องขายของเดิม · สมมติราคาคงที่</div>';
     };
     amt.oninput = () => { S.settings.lastDcaAmount = Number(amt.value) || 0; saveState(); show(); };
     v.querySelectorAll('[data-amt]').forEach(b => b.onclick = () => { amt.value = b.dataset.amt; amt.oninput(); });

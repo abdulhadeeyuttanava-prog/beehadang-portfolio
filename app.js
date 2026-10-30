@@ -64,7 +64,7 @@ function defaultState() {
   };
 }
 
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 let S;
 
 // ---------- helpers ----------
@@ -79,9 +79,9 @@ const asset = id => S.assets.find(a => a.id === id);
 const account = id => S.accounts.find(a => a.id === id);
 const fxNow = cur => cur === 'USD' ? (S.fx.USD || 0) : 1;
 
-function toast(msg) {
+function toast(msg, ms = 2600) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2600);
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, ms);
 }
 
 // ---------- portfolio maths ----------
@@ -184,22 +184,26 @@ function dcaSuggestion(amount, alloc) {
 // ---------- prices ----------
 async function refreshPrices(silent) {
   const errs = [];
+  let ok = 0;
   try {
     const r = await fetch('https://open.er-api.com/v6/latest/USD');
     const j = await r.json();
-    if (j?.rates?.THB) S.fx = { USD: j.rates.THB, at: new Date().toISOString() };
-  } catch { errs.push('อัตราแลกเปลี่ยน'); }
+    if (!j?.rates?.THB) throw new Error();
+    S.fx = { USD: j.rates.THB, at: new Date().toISOString() };
+  } catch { errs.push('ค่าเงิน USD'); }
 
   const coins = S.assets.filter(a => a.priceSource === 'coingecko' && a.coingeckoId);
   if (coins.length) {
     try {
       const ids = [...new Set(coins.map(a => a.coingeckoId))].join(',');
-      const j = await (await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=thb`)).json();
+      const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=thb`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
       for (const a of coins) {
         const p = j[a.coingeckoId]?.thb;
-        if (p != null) S.prices[a.id] = { price: p, at: new Date().toISOString() };
+        if (p != null) { S.prices[a.id] = { price: p, at: new Date().toISOString() }; ok++; }
       }
-    } catch { errs.push('คริปโต'); }
+    } catch (e) { errs.push('คริปโต (' + (e.message || 'เชื่อมต่อไม่ได้') + ')'); }
   }
 
   const stocks = S.assets.filter(a => a.priceSource === 'finnhub');
@@ -207,15 +211,16 @@ async function refreshPrices(silent) {
     for (const a of stocks) {
       try {
         const j = await (await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(a.symbol)}&token=${encodeURIComponent(S.settings.finnhubKey)}`)).json();
-        if (j?.c) S.prices[a.id] = { price: j.c, at: new Date().toISOString() };
+        if (j?.c) { S.prices[a.id] = { price: j.c, at: new Date().toISOString() }; ok++; }
       } catch { errs.push(a.symbol); }
     }
-  } else if (stocks.length && !silent) errs.push('หุ้น (ยังไม่ได้ใส่คีย์ Finnhub ในตั้งค่า)');
+  }
 
   S.lastRefresh = new Date().toISOString();
   await saveState();
   render();
-  if (!silent) toast(errs.length ? 'อัปเดตไม่ได้: ' + errs.join(', ') : 'อัปเดตราคาแล้ว');
+  if (!silent) toast(`อัปเดตราคาแล้ว ${ok} ตัว` + (errs.length ? ' · ไม่สำเร็จ: ' + errs.join(', ') : '')
+    + (stocks.length && !S.settings.finnhubKey ? ' · หุ้นต้องใส่คีย์ Finnhub ก่อน' : ''), 7000);
 }
 
 // ---------- encrypted backup ----------
@@ -394,7 +399,7 @@ function holdingsView() {
       return `<div class="row" data-asset="${h.assetId}">
         <div><b>${esc(h.asset.symbol)}</b> <span class="chip">${total ? fmt((h.valueThb || 0) / total * 100, 1) : 0}%</span>
           <div class="muted">${fmt(h.qty, h.qty < 10 ? 6 : 2)} หน่วย · ${esc(accs)}</div>
-          <div class="muted">ต้นทุนเฉลี่ย ${fmt(h.qty ? (h.asset.currency === 'THB' ? h.costThb : h.costCur) / h.qty : 0, 2)} ${h.asset.currency} · ราคา ${h.price == null ? '–' : fmt(h.price, 2)}</div></div>
+          <div class="muted">ต้นทุนเฉลี่ย ${fmt(h.qty ? (h.asset.currency === 'THB' ? h.costThb : h.costCur) / h.qty : 0, 2)} ${h.asset.currency} · ราคา ${h.price == null ? '–' : fmt(h.price, 2)}${S.prices[h.assetId]?.at ? ' · ' + new Date(S.prices[h.assetId].at).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</div></div>
         <div class="r"><b>${h.valueThb == null ? '–' : baht(h.valueThb)}</b>
           <div class="${cls(h.unrealThb)}">${h.unrealThb == null ? '' : baht(h.unrealThb) + ' (' + pct(h.unrealPct) + ')'}</div>
           ${h.unrealCur != null ? `<div class="muted">${fmt(h.unrealCur, 2)} USD · ค่าเงิน ${baht(h.fxEffectThb)}</div>` : ''}

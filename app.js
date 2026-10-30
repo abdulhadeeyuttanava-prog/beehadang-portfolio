@@ -64,7 +64,7 @@ function defaultState() {
   };
 }
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 let S;
 
 // ---------- helpers ----------
@@ -403,7 +403,8 @@ function render() {
   $('#appTitle').textContent = S.settings.displayName;
   document.title = S.settings.displayName;
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  $('#view').innerHTML = { overview, holdings: holdingsView, txns: txnsView, journal, settings: settingsView }[tab]();
+  $('#settingsBtn').classList.toggle('on', tab === 'settings');
+  $('#view').innerHTML = { overview, holdings: holdingsView, news: newsView, txns: txnsView, journal, settings: settingsView }[tab]();
   bindView();
 }
 
@@ -586,7 +587,7 @@ function holdingsView() {
           ${at ? `<span class="muted">ราคา ณ ${at}</span>` : ''}</div>
         <div class="wbar"><i style="width:${w}%;background:${COLORS[k]}"></i></div></div>`;
     }).join('')}</section>`;
-  }).join('') + `<p class="muted center">แตะสินทรัพย์เพื่อแก้ไขหรือใส่ราคาเอง</p>`;
+  }).join('') + `<p class="muted center">แตะสินทรัพย์เพื่อดูข่าว บทวิเคราะห์ และข้อมูลประกอบการตัดสินใจ</p>`;
 }
 
 function txnLine(t) {
@@ -620,6 +621,173 @@ function journal() {
       ${t.reviewDate ? `<div class="muted">วันทบทวน ${t.reviewDate} ${t.reviewed ? '✓ ทบทวนแล้ว' : ''}</div>` : ''}
       ${due ? `<div class="actions"><button class="small" data-review="${t.id}">ทบทวนตอนนี้</button></div>` : ''}</div>`;
   }).join('');
+}
+
+// ---------- news & analysis ----------
+// Headlines and analyst data come from Finnhub (the same free key as stock prices), coin stats from CoinGecko.
+// Only symbols are sent, never balances. Results stay in memory for 30 minutes.
+const NEWS = { sel: 'held', cache: {}, loading: {} };
+const COIN_WORDS = { BTC: 'bitcoin|btc', ETH: 'ethereum|ether|eth', XRP: 'xrp|ripple', DOT: 'polkadot', ZIL: 'zilliqa',
+  LUNC: 'lunc|terra classic|terra luna', USDT: 'tether|usdt', KUB: 'bitkub', BNB: 'bnb', SOL: 'solana', ADA: 'cardano' };
+const REC = [['strongBuy', 'ซื้อแรง', '#10b981'], ['buy', 'ซื้อ', '#6ee7b7'], ['hold', 'ถือ', '#fbbf24'], ['sell', 'ขาย', '#fb7185'], ['strongSell', 'ขายแรง', '#e11d48']];
+
+async function finnhub(path) {
+  const r = await fetch(`https://finnhub.io/api/v1/${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(S.settings.finnhubKey)}`);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+function cached(key, fn, ttl = 30 * 60e3) {
+  const c = NEWS.cache[key];
+  if (c && Date.now() - c.at < ttl) return Promise.resolve(c.data);
+  return fn().then(data => { NEWS.cache[key] = { at: Date.now(), data }; return data; });
+}
+const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+const heldAssets = () => computeHoldings().filter(h => h.qty > 1e-12 && h.asset.type !== 'cash' && h.asset.symbol !== 'USDT').map(h => h.asset);
+const tagNews = (list, sym) => (Array.isArray(list) ? list : []).map(n => ({ ...n, sym }));
+const coinNews = (list, sym) => {
+  const re = new RegExp(`\\b(${COIN_WORDS[sym] || sym.toLowerCase()})\\b`, 'i');
+  return tagNews(list.filter(n => re.test(n.headline + ' ' + n.summary)), sym);
+};
+
+async function loadNews(sel) {
+  const hasKey = !!S.settings.finnhubKey, out = { items: [], errs: [] };
+  const safe = (p, label) => p.catch(e => { out.errs.push(label + (e.message ? ` (${e.message})` : '')); return null; });
+  const cryptoList = () => hasKey ? safe(cached('crypto', () => finnhub('news?category=crypto')), 'ข่าวคริปโต') : Promise.resolve(null);
+  const company = sym => safe(cached('co:' + sym, () => finnhub(`company-news?symbol=${encodeURIComponent(sym)}&from=${daysAgo(14)}&to=${today()}`)), sym);
+  if (sel === 'market') {
+    if (hasKey) out.items = tagNews(await safe(cached('general', () => finnhub('news?category=general')), 'ข่าวตลาด'));
+  } else if (sel === 'crypto') {
+    out.items = tagNews(await cryptoList());
+  } else if (sel === 'held') {
+    const held = heldAssets();
+    const [cl, ...cos] = await Promise.all([cryptoList(), ...(hasKey ? held.filter(a => a.type === 'stock').map(a => company(a.symbol)) : [])]);
+    const stocks = held.filter(a => a.type === 'stock');
+    cos.forEach((l, i) => out.items.push(...tagNews(l, stocks[i].symbol).slice(0, 6)));
+    for (const a of held.filter(a => a.type === 'crypto')) out.items.push(...coinNews(cl || [], a.symbol));
+  } else {
+    const a = S.assets.find(x => x.symbol === sel);
+    if (a?.type === 'stock') {
+      const [l, rec, met] = await Promise.all(hasKey ? [company(sel),
+        safe(cached('rec:' + sel, () => finnhub(`stock/recommendation?symbol=${encodeURIComponent(sel)}`), 12 * 3600e3), 'นักวิเคราะห์'),
+        safe(cached('met:' + sel, () => finnhub(`stock/metric?symbol=${encodeURIComponent(sel)}&metric=all`).then(j => j?.metric || {}), 12 * 3600e3), 'ข้อมูลพื้นฐาน')] : []);
+      out.items = tagNews(l, sel); out.rec = rec; out.met = met;
+    } else if (a?.type === 'crypto') {
+      const ids = [...new Set(heldAssets().filter(x => x.coingeckoId).map(x => x.coingeckoId).concat(a.coingeckoId || []))].join(',');
+      const [cl, coins] = await Promise.all([cryptoList(), ids ? safe(cached('cg:' + ids, () =>
+        fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=thb&ids=${ids}&price_change_percentage=7d,30d,1y`)
+          .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }), 15 * 60e3), 'ข้อมูลเหรียญ') : null]);
+      out.items = coinNews(cl || [], sel);
+      out.coin = Array.isArray(coins) ? coins.find(c => c.id === a.coingeckoId) : null;
+    }
+  }
+  const seen = new Set();
+  out.items = out.items.filter(n => n?.headline && n.url && !seen.has(n.url) && seen.add(n.url)).sort((x, y) => y.datetime - x.datetime).slice(0, 30);
+  return out;
+}
+
+function ago(sec) {
+  const m = Math.max(1, Math.round((Date.now() / 1000 - sec) / 60));
+  return m < 60 ? `${m} นาทีก่อน` : m < 1440 ? `${Math.round(m / 60)} ชม.ก่อน` : `${Math.round(m / 1440)} วันก่อน`;
+}
+
+function newsItem(n, showSym) {
+  const tr = `https://translate.google.com/?sl=auto&tl=th&op=translate&text=${encodeURIComponent(n.headline + '\n\n' + (n.summary || ''))}`;
+  return `<div class="news">${n.image ? `<img src="${esc(n.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+    <a class="news-h" href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.headline)}</a>
+    ${n.summary ? `<div class="news-s">${esc(n.summary)}</div>` : ''}
+    <div class="sub">${showSym && n.sym ? `<span class="chip">${esc(n.sym)}</span> ` : ''}${esc(n.source || '')} · ${ago(n.datetime)} · <a href="${tr}" target="_blank" rel="noopener">แปลไทย</a></div></div>`;
+}
+
+function proLinks(a) {
+  const s = encodeURIComponent(a.symbol), name = encodeURIComponent((COIN_WORDS[a.symbol] || a.symbol).split('|')[0]);
+  const links = a.type === 'crypto' ? [
+    [`https://www.coingecko.com/th/coins/${encodeURIComponent(a.coingeckoId || a.symbol.toLowerCase())}`, 'CoinGecko', 'ข้อมูลเหรียญ ภาษาไทย'],
+    [`https://www.tradingview.com/symbols/${s}USD/ideas/`, 'TradingView', 'มุมมองเทคนิคจากเทรดเดอร์'],
+    [`https://www.coindesk.com/search?s=${name}`, 'CoinDesk', 'ข่าวและบทวิเคราะห์คริปโต'],
+  ] : [
+    [`https://finance.yahoo.com/quote/${s}/analysis/`, 'Yahoo Finance', 'ประมาณการกำไรและราคาเป้าหมาย'],
+    [`https://seekingalpha.com/symbol/${s}/analysis`, 'Seeking Alpha', 'บทวิเคราะห์จากนักลงทุน'],
+    [`https://www.morningstar.com/search?query=${s}`, 'Morningstar', 'เรตติ้งและมูลค่าที่เหมาะสม'],
+    [`https://www.tradingview.com/symbols/${s}/ideas/`, 'TradingView', 'มุมมองเทคนิคจากเทรดเดอร์'],
+  ];
+  const q = a.type === 'crypto' ? (COIN_WORDS[a.symbol] || a.symbol).split('|')[0] : a.sector === 'ETF' ? a.symbol : a.name || a.symbol;
+  links.push([`https://news.google.com/search?q=${encodeURIComponent(q)}&hl=th&gl=TH&ceid=TH:th`, 'Google News', 'ข่าวภาษาไทย']);
+  return `<section class="card"><h2>บทวิเคราะห์จากมืออาชีพ</h2>${links.map(([u, t, d]) =>
+    `<a class="linkrow" href="${u}" target="_blank" rel="noopener"><span><b>${t}</b><span class="sub">${d}</span></span><span class="accent">›</span></a>`).join('')}</section>`;
+}
+
+function assetPanel(a, d) {
+  const hs = computeHoldings(), h = hs.find(x => x.assetId === a.id), total = hs.reduce((s, x) => s + (x.valueThb || 0), 0);
+  const parts = [];
+  if (h && h.qty > 1e-12) {
+    const avg = h.qty ? (a.currency === 'THB' ? h.costThb : h.costCur) / h.qty : 0;
+    const group = hs.filter(x => x.asset.type === a.type).reduce((s, x) => s + (x.valueThb || 0), 0);
+    parts.push(`<div class="kv"><span>ถืออยู่</span><b>${fmt(h.qty, h.qty < 10 ? 6 : 2)}</b></div>
+      <div class="kv"><span>ทุนเฉลี่ย</span><b>${px(avg)} ${a.currency}</b></div>
+      <div class="kv"><span>ราคาตอนนี้</span><b>${h.price == null ? '–' : px(h.price) + ' ' + a.currency}</b></div>
+      <div class="kv"><span>กำไร/ขาดทุน</span><b class="${cls(h.unrealThb)}">${h.unrealPct == null ? '–' : pct(h.unrealPct)}</b></div>
+      <div class="kv"><span>สัดส่วนในพอร์ต</span><b>${total ? fmt((h.valueThb || 0) / total * 100, 1) : 0}%</b></div>
+      ${a.groupTarget ? `<div class="kv"><span>ใน${TYPES[a.type]} / เป้า</span><b>${group ? fmt((h.valueThb || 0) / group * 100, 0) : 0}% / ${fmt(a.groupTarget, 0)}%</b></div>` : ''}`);
+  }
+  let range = '';
+  const m = d?.met, c = d?.coin;
+  if (m && m['52WeekHigh'] && m['52WeekLow']) {
+    const p = priceOf(a), lo = m['52WeekLow'], hi = m['52WeekHigh'], pos = p == null ? null : Math.min(1, Math.max(0, (p - lo) / (hi - lo)));
+    const pe = m.peTTM ?? m.peBasicExclExtraTTM ?? m.peNormalizedAnnual, dy = m.currentDividendYieldTTM ?? m.dividendYieldIndicatedAnnual;
+    range = `<div class="range"><div class="range-t"><span>ต่ำสุด 52 สัปดาห์ ${px(lo)}</span><span>สูงสุด ${px(hi)}</span></div>
+      <div class="range-bar">${pos == null ? '' : `<i style="left:${pos * 100}%"></i>`}</div>
+      ${pos == null ? '' : `<div class="sub">ราคาตอนนี้อยู่ที่ ${fmt(pos * 100, 0)}% ของช่วงปีที่ผ่านมา</div>`}</div>
+      <div class="facts">${[['P/E', pe, v => fmt(v, 1)], ['ปันผล/ปี', dy, v => fmt(v, 2) + '%'], ['ผลตอบแทน 1 ปี', m['52WeekPriceReturnDaily'], v => pct(v / 100)], ['Beta', m.beta, v => fmt(v, 2)]]
+        .filter(([, v]) => Number.isFinite(v)).map(([k, v, f]) => `<div><span>${k}</span><b>${f(v)}</b></div>`).join('')}</div>`;
+  } else if (c) {
+    const ch = k => c[`price_change_percentage_${k}_in_currency`];
+    range = `<div class="facts">${[['7 วัน', ch('7d')], ['30 วัน', ch('30d')], ['1 ปี', ch('1y')]].filter(([, v]) => Number.isFinite(v))
+      .map(([k, v]) => `<div><span>${k}</span><b class="${cls(v)}">${pct(v / 100)}</b></div>`).join('')}
+      ${c.market_cap_rank ? `<div><span>อันดับมูลค่าตลาด</span><b>#${c.market_cap_rank}</b></div>` : ''}</div>
+      ${Number.isFinite(c.ath_change_percentage) ? `<div class="sub" style="margin-top:8px">ต่ำกว่าจุดสูงสุดตลอดกาล ${fmt(Math.abs(c.ath_change_percentage), 1)}% (สูงสุด ${px(c.ath)} ฿${c.ath_date ? ' เมื่อ ' + new Date(c.ath_date).toLocaleDateString('th-TH', { month: 'short', year: 'numeric' }) : ''})</div>` : ''}`;
+  }
+  const mine = S.txns.filter(t => t.assetId === a.id && (t.reason || t.exitPlan)).sort((x, y) => y.date.localeCompare(x.date))[0];
+  const thesis = mine ? `<div class="thesis"><b>เหตุผลที่คุณบันทึกไว้ (${mine.date})</b><div>${esc(mine.reason || '')}</div>${mine.exitPlan ? `<div class="sub">จะเปลี่ยนใจเมื่อ: ${esc(mine.exitPlan)}</div>` : ''}</div>`
+    : `<div class="thesis muted">ยังไม่มีเหตุผลที่บันทึกไว้สำหรับ ${esc(a.symbol)} ก่อนซื้อขายครั้งหน้า ลองเขียนเหตุผลและเงื่อนไขที่จะเปลี่ยนใจไว้ จะช่วยให้ตัดสินใจได้ดีขึ้น</div>`;
+  return `<section class="card"><h2><span class="hdr">${avatar(a.symbol)}<span><b>${esc(a.symbol)}</b><span class="sub">${esc(a.name !== a.symbol ? a.name : TYPES[a.type])}</span></span></span></h2>
+    ${parts.length ? `<div class="kvs">${parts.join('')}</div>` : ''}${range}${thesis}
+    <div class="actions" style="justify-content:flex-start"><button class="small" id="tradeBtn">บันทึกซื้อ/ขาย</button><button class="small ghost" data-editasset="${a.id}">แก้ไขสินทรัพย์</button></div></section>`;
+}
+
+function recCard(rec) {
+  if (!Array.isArray(rec) || !rec.length) return `<section class="card"><h2>มุมมองนักวิเคราะห์</h2><p class="muted">ไม่มีคะแนนจากนักวิเคราะห์ (ETF มักไม่มี) ดูบทวิเคราะห์จากลิงก์ด้านล่างแทน</p></section>`;
+  const cur = rec[0], n = REC.reduce((s, [k]) => s + (cur[k] || 0), 0);
+  if (!n) return '';
+  const bull = r => { const t = REC.reduce((s, [k]) => s + (r[k] || 0), 0); return t ? ((r.strongBuy || 0) + (r.buy || 0)) / t : null; };
+  const old = rec[3] || rec[rec.length - 1], b0 = old !== cur ? bull(old) : null, b1 = bull(cur);
+  return `<section class="card"><h2>มุมมองนักวิเคราะห์ <span class="muted">${n} คน · ${new Date(cur.period).toLocaleDateString('th-TH', { month: 'short', year: 'numeric' })}</span></h2>
+    <div class="recbar">${REC.map(([k, , c]) => cur[k] ? `<i style="flex:${cur[k]};background:${c}"></i>` : '').join('')}</div>
+    <div class="recleg">${REC.map(([k, l, c]) => `<span><i style="background:${c}"></i>${l} ${cur[k] || 0}</span>`).join('')}</div>
+    <p class="muted">แนะนำซื้อ ${fmt(b1 * 100, 0)}% ของนักวิเคราะห์${b0 != null ? ` · ${old.period.slice(0, 7)} อยู่ที่ ${fmt(b0 * 100, 0)}%` : ''}</p></section>`;
+}
+
+function newsView() {
+  const held = heldAssets(), sel = NEWS.sel, a = S.assets.find(x => x.symbol === sel);
+  const chips = [['held', 'ของที่ถือ'], ['market', 'ตลาดโลก'], ['crypto', 'คริปโต'], ...held.map(x => [x.symbol, x.symbol])];
+  const d = NEWS.cache['view:' + sel]?.data;
+  if (!d && !NEWS.loading[sel]) {
+    NEWS.loading[sel] = true;
+    loadNews(sel).then(v => { NEWS.cache['view:' + sel] = { at: Date.now(), data: v }; })
+      .catch(e => { NEWS.cache['view:' + sel] = { at: Date.now(), data: { items: [], errs: [e.message] } }; })
+      .finally(() => { NEWS.loading[sel] = false; if (tab === 'news' && NEWS.sel === sel) render(); });
+  }
+  const noKey = !S.settings.finnhubKey ? `<div class="card alert-row"><span class="ico warn">🔑</span><div class="txt">ข่าวและคะแนนนักวิเคราะห์ใช้คีย์ Finnhub ฟรี ตัวเดียวกับราคาหุ้น<div class="sub">ใส่คีย์ในหน้าตั้งค่า แล้วกลับมาที่หน้านี้</div></div><button class="small ghost" data-go="settings">ตั้งค่า</button></div>` : '';
+  const items = d ? d.items : [];
+  const list = !d ? `<p class="muted center">กำลังโหลดข่าว…</p>`
+    : items.length ? items.map(n => newsItem(n, sel === 'held' || sel === 'crypto')).join('')
+    : `<p class="muted center">${S.settings.finnhubKey ? 'ยังไม่มีข่าวใน 2 สัปดาห์นี้' + (a?.type === 'stock' ? ' (ETF มักมีข่าวน้อย ลองดู "ตลาดโลก")' : '') : 'ใส่คีย์ Finnhub เพื่อดูข่าว'}</p>`;
+  return `<div class="chips">${chips.map(([k, l]) => `<button class="chipsel ${k === sel ? 'on' : ''}" data-news="${esc(k)}">${esc(l)}</button>`).join('')}</div>
+    ${noKey}${a ? assetPanel(a, d) : ''}${a?.type === 'stock' && d && S.settings.finnhubKey ? recCard(d.rec) : ''}
+    <section class="card"><h2>${a ? 'ข่าวล่าสุดของ ' + esc(a.symbol) : sel === 'market' ? 'ข่าวตลาดโลก' : sel === 'crypto' ? 'ข่าวคริปโต' : 'ข่าวของสินทรัพย์ที่ถือ'}
+      ${d ? `<button class="link" id="newsReload">โหลดใหม่</button>` : ''}</h2>${list}
+      ${d?.errs?.length ? `<p class="muted">โหลดไม่สำเร็จ: ${esc(d.errs.join(', '))}</p>` : ''}</section>
+    ${a ? proLinks(a) : ''}
+    <p class="muted center">ข่าวและความเห็นมาจากแหล่งภายนอก ใช้ประกอบการตัดสินใจ ไม่ใช่คำแนะนำให้ซื้อหรือขาย</p>`;
 }
 
 function settingsView() {
@@ -826,7 +994,15 @@ function bindView() {
   const v = $('#view');
   v.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { tab = b.dataset.go; render(); });
   v.querySelectorAll('[data-txn]').forEach(r => r.onclick = () => txnForm(S.txns.find(t => t.id === r.dataset.txn)));
-  v.querySelectorAll('[data-asset]').forEach(r => r.onclick = () => assetForm(asset(r.dataset.asset)));
+  v.querySelectorAll('[data-asset]').forEach(r => r.onclick = () => { NEWS.sel = asset(r.dataset.asset).symbol; tab = 'news'; render(); scrollTo(0, 0); });
+  v.querySelectorAll('[data-news]').forEach(b => b.onclick = () => { NEWS.sel = b.dataset.news; render(); });
+  const reload = $('#newsReload');
+  if (reload) reload.onclick = () => { for (const k of Object.keys(NEWS.cache)) if (!k.startsWith('rec:') && !k.startsWith('met:')) delete NEWS.cache[k]; render(); };
+  const trade = $('#tradeBtn');
+  if (trade) trade.onclick = () => {
+    const a = S.assets.find(x => x.symbol === NEWS.sel), h = computeHoldings().find(x => x.assetId === a?.id);
+    txnForm({}, { assetId: a?.id, accountId: h && Object.entries(h.byAccount).sort((x, y) => y[1] - x[1])[0]?.[0] });
+  };
   v.querySelectorAll('[data-editasset]').forEach(r => r.onclick = () => assetForm(asset(r.dataset.editasset)));
   v.querySelectorAll('[data-review]').forEach(b => b.onclick = () => reviewForm(S.txns.find(t => t.id === b.dataset.review)));
   v.querySelectorAll('[data-dca]').forEach(b => b.onclick = () => {
@@ -903,6 +1079,7 @@ function bindView() {
 }
 
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); scrollTo(0, 0); });
+$('#settingsBtn').onclick = () => { tab = 'settings'; render(); scrollTo(0, 0); };
 $('#fab').onclick = () => txnForm();
 $('#refreshBtn').onclick = () => refreshPrices(false);
 
@@ -918,7 +1095,7 @@ $('#refreshBtn').onclick = () => refreshPrices(false);
     // When a new version takes over, reload once so the screen shows it straight away.
     const hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) location.reload(); });
-    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update());
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r?.update());
   }
   if (navigator.storage?.persist) navigator.storage.persist();
 })();

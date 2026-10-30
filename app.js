@@ -133,6 +133,8 @@ function priceOf(a) {
 function xirr(flows) {
   if (flows.length < 2 || !flows.some(f => f.v > 0) || !flows.some(f => f.v < 0)) return null;
   const t0 = flows[0].d;
+  // Annualising less than ~3 months of history gives wild numbers, so wait for more data.
+  if (flows[flows.length - 1].d - t0 < 90 * 864e5) return null;
   const yrs = f => (f.d - t0) / 31557600000;
   const npv = r => flows.reduce((s, f) => s + f.v / Math.pow(1 + r, yrs(f)), 0);
   let lo = -0.9999, hi = 10;
@@ -247,6 +249,33 @@ async function importBackup(file, pass) {
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
+// Starter file: plain JSON of opening positions, referenced by account name and symbol.
+// It is merged into what is already on the device instead of replacing it.
+async function importStarter(j) {
+  if (!confirm(`นำเข้า ${j.txns.length} รายการจากไฟล์ "${j.title || 'ข้อมูลเริ่มต้น'}"?`)) return;
+  let added = 0, skipped = 0;
+  for (const r of j.txns) {
+    let acc = S.accounts.find(a => a.name.toLowerCase() === r.account.toLowerCase());
+    if (!acc) { acc = { id: uid(), name: r.account }; S.accounts.push(acc); }
+    let a = S.assets.find(x => x.symbol === r.symbol);
+    if (!a) {
+      const type = r.assetType || 'crypto';
+      a = { id: uid(), symbol: r.symbol, name: r.name || r.symbol, type, currency: r.currency || 'THB',
+        priceSource: type === 'crypto' ? 'coingecko' : type === 'cash' ? 'fixed' : 'manual',
+        coingeckoId: COINGECKO[r.symbol] || '', country: '', sector: '' };
+      S.assets.push(a);
+    }
+    const key = r.importKey || `${r.date}|${r.account}|${r.symbol}|${r.qty}`;
+    if (S.txns.some(t => t.importKey === key)) { skipped++; continue; }
+    S.txns.push({ id: uid(), type: r.type || 'buy', date: r.date, accountId: acc.id, assetId: a.id, qty: r.qty, price: r.price,
+      amount: r.amount, currency: r.currency || 'THB', fx: r.fx || 1, fee: r.fee, reason: r.reason || '', importKey: key });
+    if (r.marketPrice != null && !S.prices[a.id]) S.prices[a.id] = { price: r.marketPrice, at: r.date + 'T12:00:00Z' };
+    added++;
+  }
+  S.dirty = true; await saveState(); render();
+  toast(`นำเข้าแล้ว ${added} รายการ${skipped ? ` (ข้าม ${skipped} ที่เคยนำเข้าแล้ว)` : ''}`);
+}
+
 // ---------- views ----------
 let tab = 'overview';
 
@@ -313,7 +342,7 @@ function overview() {
   </div>
   <div class="grid2">
     <div class="card stat"><h2>กำไรที่ยังไม่ขาย</h2><div class="v ${cls(unreal)}">${baht(unreal)}</div><div class="muted">${pct(cost ? unreal / cost : null)}</div></div>
-    <div class="card stat"><h2>XIRR ต่อปี</h2><div class="v ${cls(irr)}">${pct(irr)}</div><div class="muted">คิดตามจังหวะเงินที่ใส่</div></div>
+    <div class="card stat"><h2>XIRR ต่อปี</h2><div class="v ${cls(irr)}">${pct(irr)}</div><div class="muted">${irr == null ? 'ต้องมีข้อมูลอย่างน้อย 3 เดือน' : 'คิดตามจังหวะเงินที่ใส่'}</div></div>
     <div class="card stat"><h2>กำไรที่ขายแล้ว</h2><div class="v ${cls(realized)}">${baht(realized)}</div></div>
     <div class="card stat"><h2>ปันผล/ดอกเบี้ยสุทธิ</h2><div class="v good">${baht(income)}</div></div>
   </div>
@@ -401,7 +430,7 @@ function settingsView() {
   <div class="card"><h2>สำรองข้อมูล</h2>
     <p class="muted">ข้อมูลอยู่ในเครื่องนี้เท่านั้น ถ้าลบแอปหรือล้างเบราว์เซอร์ ข้อมูลจะหาย ให้สำรองไฟล์เข้ารหัสไว้ใน iCloud/Google Drive ของคุณเป็นประจำ
     ${S.lastBackup ? '<br>สำรองล่าสุด ' + new Date(S.lastBackup).toLocaleString('th-TH') : ''}</p>
-    <div class="actions" style="justify-content:flex-start"><button id="backupBtn">สำรองข้อมูล</button><button id="restoreBtn" class="ghost">กู้คืนจากไฟล์</button></div>
+    <div class="actions" style="justify-content:flex-start"><button id="backupBtn">สำรองข้อมูล</button><button id="restoreBtn" class="ghost">กู้คืน / นำเข้าไฟล์</button></div>
     <input type="file" id="restoreFile" accept=".json,application/json" hidden></div>
   <div class="card"><h2>พอร์ตเป้าหมาย (%)</h2>
     <div class="grid2">${Object.keys(T).map(k => `<div><label>${TYPES[k]}</label><input type="number" data-target="${k}" value="${T[k]}"></div>`).join('')}</div>
@@ -612,8 +641,12 @@ function bindView() {
     };
     $('#backupBtn').onclick = () => passForm('สำรองข้อมูลแบบเข้ารหัส', async p => { await exportBackup(p); render(); toast('สำรองแล้ว'); });
     $('#restoreBtn').onclick = () => $('#restoreFile').click();
-    $('#restoreFile').onchange = e => {
+    $('#restoreFile').onchange = async e => {
       const file = e.target.files[0]; if (!file) return;
+      e.target.value = '';
+      let j = null;
+      try { j = JSON.parse(await file.text()); } catch { return toast('อ่านไฟล์ไม่ได้'); }
+      if (j?.starter) return importStarter(j);
       passForm('กู้คืนข้อมูล (ข้อมูลในเครื่องนี้จะถูกแทนที่)', async p => {
         const data = await importBackup(file, p);
         if (!data?.settings || !Array.isArray(data.txns)) throw new Error('ไฟล์ไม่ถูกต้อง');

@@ -1,5 +1,5 @@
-// App-shell cache. Bump VERSION on every release so phones pick up the new files.
-const VERSION = 'v1';
+// App-shell cache for offline use.
+const VERSION = 'v2';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {
@@ -16,5 +16,10 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   // Price APIs always go to the network; only our own files are cached.
   if (url.origin !== location.origin) return;
-  e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request)));
+  // Network first so app updates show up on the next open; cache keeps it working offline.
+  e.respondWith(fetch(e.request).then(res => {
+    const copy = res.clone();
+    caches.open(VERSION).then(c => c.put(e.request, copy));
+    return res;
+  }).catch(() => caches.match(e.request)));
 });

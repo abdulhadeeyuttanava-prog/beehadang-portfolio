@@ -64,7 +64,7 @@ function defaultState() {
   };
 }
 
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 let S;
 
 // ---------- helpers ----------
@@ -190,7 +190,8 @@ function monthsToTarget(monthly, alloc) {
   if (!(monthly > 0) || !alloc.total) return null;
   let need = alloc.total;
   for (const k of Object.keys(T)) if (T[k] > 0 && alloc.by[k] > 0) need = Math.max(need, alloc.by[k] / (T[k] / 100));
-  for (const k of Object.keys(T)) if (T[k] === 0 && alloc.by[k] > 1) return null;
+  // A group with a 0% target never shrinks without selling, unless it is already small enough to ignore.
+  for (const k of Object.keys(T)) if (T[k] === 0 && alloc.by[k] / alloc.total * 100 > S.settings.band) return null;
   return Math.ceil((need - alloc.total) / monthly);
 }
 
@@ -278,18 +279,35 @@ async function importBackup(file, pass) {
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
-// Starter file: plain JSON of opening positions, referenced by account name and symbol.
-// It is merged into what is already on the device instead of replacing it.
+// Starter file or pasted text: entries referenced by account name and symbol.
+// It is merged into what is already on the device; CLEAR lines replace earlier imported entries.
 async function importStarter(j) {
-  if (!confirm(`นำเข้า ${j.txns.length} รายการจากไฟล์ "${j.title || 'ข้อมูลเริ่มต้น'}"?`)) return;
+  const clear = j.clear || [], targets = j.targets || [], dca = j.dca || [];
+  const accOf = name => S.accounts.find(a => a.name.toLowerCase() === name.toLowerCase());
+  // CLEAR only touches imported entries, so anything typed in by hand stays.
+  const cleared = t => t.importKey && clear.some(c => {
+    const acc = accOf(c.account);
+    return acc && t.accountId === acc.id && (!c.symbol || asset(t.assetId)?.symbol === c.symbol);
+  });
+  const nClear = S.txns.filter(cleared).length;
+  const parts = [`เพิ่ม ${j.txns.length} รายการ`];
+  if (nClear) parts.push(`ลบรายการที่เคยนำเข้าของ ${[...new Set(clear.map(c => c.account))].join(', ')} ${nClear} รายการ`);
+  if (targets.length) parts.push(`ตั้งสัดส่วนในกลุ่ม ${targets.length} ตัว`);
+  if (dca.length) parts.push(`ตั้งแผน DCA ${dca.length} แผน`);
+  if (j.goal) parts.push(`พอร์ตเป้าหมาย หุ้น ${j.goal.stock}% คริปโต ${j.goal.crypto}%`);
+  if (!confirm(`นำเข้าจาก "${j.title || 'ข้อมูลเริ่มต้น'}"\n• ${parts.join('\n• ')}\n\nกดย้อนกลับได้ในหน้าตั้งค่า`)) return;
+
+  S.undo = JSON.stringify({ at: new Date().toISOString(), txns: S.txns, dca: S.dca, assets: S.assets, accounts: S.accounts,
+    targets: S.settings.targets, lastDcaAmount: S.settings.lastDcaAmount });
+  S.txns = S.txns.filter(t => !cleared(t));
   let added = 0, skipped = 0;
   for (const r of j.txns) {
-    let acc = S.accounts.find(a => a.name.toLowerCase() === r.account.toLowerCase());
+    let acc = accOf(r.account);
     if (!acc) { acc = { id: uid(), name: r.account }; S.accounts.push(acc); }
     let a = S.assets.find(x => x.symbol === r.symbol);
     if (!a) {
       const type = r.assetType || 'crypto';
-      a = { id: uid(), symbol: r.symbol, name: r.name || r.symbol, type, currency: r.currency || 'THB',
+      a = { id: uid(), symbol: r.symbol, name: r.name || r.symbol, type, currency: type === 'crypto' || type === 'cash' ? 'THB' : r.currency || 'THB',
         priceSource: type === 'crypto' ? 'coingecko' : type === 'cash' ? 'fixed' : 'manual',
         coingeckoId: COINGECKO[r.symbol] || '', country: '', sector: '' };
       S.assets.push(a);
@@ -297,25 +315,85 @@ async function importStarter(j) {
     const key = r.importKey || `${r.date}|${r.account}|${r.symbol}|${r.qty}`;
     if (S.txns.some(t => t.importKey === key)) { skipped++; continue; }
     S.txns.push({ id: uid(), type: r.type || 'buy', date: r.date, accountId: acc.id, assetId: a.id, qty: r.qty, price: r.price,
-      amount: r.amount, currency: r.currency || 'THB', fx: r.fx || 1, fee: r.fee, reason: r.reason || '', importKey: key });
+      amount: r.amount, currency: r.currency || 'THB', fx: r.fx || 1, fee: r.fee, reason: r.reason || '', note: r.note, importKey: key });
     if (r.marketPrice != null && !S.prices[a.id]) S.prices[a.id] = { price: r.marketPrice, at: r.date + 'T12:00:00Z' };
     added++;
   }
+  for (const g of targets) {
+    const a = S.assets.find(x => x.symbol === g.symbol);
+    if (a) a.groupTarget = g.pct > 0 ? g.pct : undefined;
+  }
+  const ym = today().slice(0, 7);
+  for (const p of dca) {
+    let acc = accOf(p.account);
+    if (!acc) { acc = { id: uid(), name: p.account }; S.accounts.push(acc); }
+    const a = S.assets.find(x => x.symbol === p.symbol); if (!a) continue;
+    S.dca = S.dca.filter(x => !(x.accountId === acc.id && x.assetId === a.id));
+    const plan = { id: uid(), assetId: a.id, accountId: acc.id, amount: p.amount, currency: p.currency, day: p.day };
+    S.dca.push(plan);
+    // A buy already made this month counts as this month's round.
+    S.txns.filter(t => t.type === 'buy' && t.accountId === acc.id && t.assetId === a.id && t.date.startsWith(ym)).forEach(t => t.dcaId = plan.id);
+  }
+  if (dca.length) S.settings.lastDcaAmount = Math.round(S.dca.reduce((s, p) => s + p.amount * fxNow(p.currency), 0));
+  if (j.goal) S.settings.targets = { ...j.goal };
   S.dirty = true; await saveState(); render();
-  toast(`นำเข้าแล้ว ${added} รายการ${skipped ? ` (ข้าม ${skipped} ที่เคยนำเข้าแล้ว)` : ''}`);
+  toast(`นำเข้าแล้ว ${added} รายการ${nClear ? ` แทนของเดิม ${nClear}` : ''}${skipped ? ` (ข้าม ${skipped} ที่มีอยู่แล้ว)` : ''}`, 4000);
 }
 
-// "account,symbol,qty,price[,currency[,market price]]" per line → starter rows dated today.
+async function undoImport() {
+  if (!S.undo || !confirm('ย้อนกลับไปก่อนการนำเข้าครั้งล่าสุด?')) return;
+  const u = JSON.parse(S.undo);
+  Object.assign(S, { txns: u.txns, dca: u.dca, assets: u.assets, accounts: u.accounts });
+  S.settings.targets = u.targets; S.settings.lastDcaAmount = u.lastDcaAmount;
+  delete S.undo; S.dirty = true; await saveState(); render(); toast('ย้อนกลับแล้ว');
+}
+
+// Pasted text, one entry per line; lines starting with # are notes.
+//   account,symbol,qty,price[,currency[,market price]]                opening balance dated today
+//   YYYY-MM-DD,account,symbol,qty,price[,currency[,fx[,fee[,note]]]]   a buy on that date (fee in the same currency)
+//   CLEAR,account[,symbol]          replace what was imported before for that account (or coin)
+//   TARGET,symbol,%                 share within its group, used to split DCA (0 = leave out)
+//   DCA,account,symbol,amount,currency,day
+//   GOAL,stock%,crypto%,gold%,cash%
 function parsePasted(text) {
-  const txns = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map((l, i) => {
-    const [account, symbol, qty, price, currency = 'THB', market] = l.split(',').map(x => x.trim());
-    const q = Number(qty), p = Number(price);
-    if (!account || !symbol || !(q > 0) || !(p >= 0)) throw new Error(`บรรทัด ${i + 1}`);
-    const sym = symbol.toUpperCase(), cur = currency.toUpperCase();
-    return { date: today(), account, symbol: sym, qty: q, price: p, currency: cur, fx: fxNow(cur),
-      assetType: sym === 'DEPOSIT' ? 'cash' : undefined, marketPrice: market ? Number(market) : p, reason: 'ยอดยกมา (วางจากข้อความ)' };
+  const out = { starter: 1, title: 'ข้อความที่วาง', txns: [], clear: [], targets: [], dca: [], goal: null };
+  const num = x => x === undefined || x === '' ? undefined : Number(String(x).replace(/[฿$\s]/g, ''));
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const l = raw.trim(); if (!l || l.startsWith('#')) return;
+    const f = l.split(',').map(x => x.trim()), cmd = f[0].toUpperCase();
+    const bad = () => { throw new Error(`บรรทัด ${i + 1} "${l.slice(0, 40)}"`); };
+    if (cmd === 'CLEAR') {
+      if (!f[1]) bad();
+      out.clear.push({ account: f[1], symbol: f[2] ? f[2].toUpperCase() : undefined });
+    } else if (cmd === 'TARGET') {
+      const v = num(f[2]) ?? 0;
+      if (!f[1] || !(v >= 0)) bad();
+      out.targets.push({ symbol: f[1].toUpperCase(), pct: v });
+    } else if (cmd === 'DCA') {
+      const amount = num(f[3]), day = num(f[5]) ?? 1;
+      if (!f[1] || !f[2] || !(amount > 0) || !(day >= 1 && day <= 28)) bad();
+      out.dca.push({ account: f[1], symbol: f[2].toUpperCase(), amount, currency: (f[4] || 'THB').toUpperCase(), day: Math.round(day) });
+    } else if (cmd === 'GOAL') {
+      const [stock, crypto, gold = 0, cash = 0] = f.slice(1).map(x => num(x) ?? 0);
+      if (![stock, crypto, gold, cash].every(n => n >= 0) || Math.abs(stock + crypto + gold + cash - 100) > 0.01) bad();
+      out.goal = { stock, crypto, gold, cash };
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(f[0])) {
+      const [date, account, symbol, qty, price, currency = 'THB', fx, fee, ...note] = f;
+      const q = num(qty), p = num(price), cur = currency.toUpperCase(), sym = (symbol || '').toUpperCase();
+      if (!account || !sym || !(q > 0) || !(p >= 0)) bad();
+      out.txns.push({ date, account, symbol: sym, qty: q, price: p, currency: cur, fx: num(fx) || fxNow(cur), fee: num(fee) || undefined,
+        assetType: sym === 'DEPOSIT' ? 'cash' : undefined, note: note.join(',') || undefined });
+    } else {
+      const [account, symbol, qty, price, currency = 'THB', market] = f;
+      const q = num(qty), p = num(price);
+      if (!account || !symbol || !(q > 0) || !(p >= 0)) bad();
+      const sym = symbol.toUpperCase(), cur = currency.toUpperCase();
+      out.txns.push({ date: today(), account, symbol: sym, qty: q, price: p, currency: cur, fx: fxNow(cur),
+        assetType: sym === 'DEPOSIT' ? 'cash' : undefined, marketPrice: market ? num(market) : p, note: 'ยอดยกมา (วางจากข้อความ)' });
+    }
   });
-  return { starter: 1, title: 'ข้อความที่วาง', txns };
+  if (!out.txns.length && !out.clear.length && !out.targets.length && !out.dca.length && !out.goal) throw new Error('ไม่พบรายการ');
+  return out;
 }
 
 // ---------- views ----------
@@ -516,7 +594,7 @@ function txnLine(t) {
   const amt = t.type === 'buy' || t.type === 'sell' ? t.qty * t.price : t.amount;
   return `<div class="row" data-txn="${t.id}">${avatar(a?.symbol || '?')}<div class="grow"><b>${TX[t.type]} ${esc(a?.symbol)}</b>
     <div class="muted">${t.date} · ${esc(account(t.accountId)?.name || '')}${t.type === 'buy' || t.type === 'sell' ? ` · ${fmt(t.qty, 6)} @ ${fmt(t.price, 2)}` : ''}</div>
-    ${t.reason ? `<div class="muted">“${esc(t.reason.slice(0, 80))}”</div>` : ''}</div>
+    ${t.reason ? `<div class="muted">“${esc(t.reason.slice(0, 80))}”</div>` : ''}${t.note ? `<div class="muted">${esc(t.note)}</div>` : ''}</div>
     <div class="r">${fmt(amt, 2)} ${t.currency}${t.currency !== 'THB' ? `<div class="muted">${baht(amt * fx)}</div>` : ''}</div></div>`;
 }
 
@@ -553,9 +631,9 @@ function settingsView() {
     <div class="actions" style="justify-content:flex-start"><button id="backupBtn">สำรองข้อมูล</button><button id="restoreBtn" class="ghost">กู้คืน / นำเข้าไฟล์</button></div>
     <input type="file" id="restoreFile" accept=".json,application/json" hidden></div>
   <div class="card"><h2>วางข้อมูล</h2>
-    <p class="muted">วางข้อความที่ได้จาก Claude แล้วกดนำเข้า บรรทัดละรายการ: บัญชี,สัญลักษณ์,จำนวน,ราคาต่อหน่วย[,สกุลเงิน]</p>
+    <p class="muted">วางข้อความที่ได้จาก Claude แล้วกดนำเข้า แอปจะสรุปให้ดูก่อนว่าจะเพิ่มหรือแทนอะไร วางซ้ำได้โดยไม่เกิดรายการซ้ำ</p>
     <textarea id="pasteBox" rows="5" placeholder="Bitazza,ETH,0.6806,75178.13"></textarea>
-    <div class="actions" style="justify-content:flex-start"><button id="pasteBtn">นำเข้าจากข้อความ</button></div></div>
+    <div class="actions" style="justify-content:flex-start"><button id="pasteBtn">นำเข้าจากข้อความ</button>${S.undo ? `<button id="undoBtn" class="ghost">ย้อนการนำเข้าล่าสุด</button>` : ''}</div></div>
   <div class="card"><h2>พอร์ตเป้าหมาย (%)</h2>
     <div class="grid2">${Object.keys(T).map(k => `<div><label>${TYPES[k]}</label><input type="number" data-target="${k}" value="${T[k]}"></div>`).join('')}</div>
     <div class="grid2"><div><label>แจ้งเตือนเมื่อห่างเกิน (±%)</label><input type="number" id="band" value="${st.band}"></div>
@@ -630,7 +708,7 @@ function txnForm(t = {}, preset = {}) {
         qty: num('qty'), price: num('price'), amount: num('amount'), currency: fd.get('currency'), fx: num('fx') || 1,
         fee: num('fee'), tax: num('tax'), reason: fd.get('reason').trim(), exitPlan: fd.get('exitPlan').trim(),
         confidence: num('confidence'), reviewDate: fd.get('reviewDate') || '', dcaId: fd.get('dcaId') || undefined,
-        reviewed: t.reviewed, reviewNote: t.reviewNote };
+        reviewed: t.reviewed, reviewNote: t.reviewNote, note: t.note, importKey: t.importKey };
       if ((rec.type === 'buy' || rec.type === 'sell') && !(rec.qty > 0 && rec.price >= 0)) { toast('ใส่จำนวนหน่วยและราคา'); return false; }
       if (!['buy', 'sell'].includes(rec.type) && !(rec.amount > 0)) { toast('ใส่จำนวนเงิน'); return false; }
       S.txns = S.txns.filter(x => x.id !== rec.id).concat(rec);
@@ -800,6 +878,7 @@ function bindView() {
     };
     $('#backupBtn').onclick = () => passForm('สำรองข้อมูลแบบเข้ารหัส', async p => { await exportBackup(p); render(); toast('สำรองแล้ว'); });
     $('#restoreBtn').onclick = () => $('#restoreFile').click();
+    if ($('#undoBtn')) $('#undoBtn').onclick = undoImport;
     $('#pasteBtn').onclick = () => {
       const text = $('#pasteBox').value.trim();
       if (!text) return toast('ยังไม่ได้วางข้อความ');
@@ -829,6 +908,8 @@ $('#refreshBtn').onclick = () => refreshPrices(false);
 
 (async () => {
   S = await loadState() || defaultState();
+  // Import notes used to sit in the journal's reason field.
+  for (const t of S.txns) if (t.importKey && /^ยอดยกมา/.test(t.reason || '')) { t.note = t.reason; t.reason = ''; }
   await saveState();
   render();
   // Daily prices: refresh when the app opens if the last refresh is older than 6 hours.

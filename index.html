@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Beehadang's portfolio</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1 id="appTitle">Beehadang's portfolio</h1>
+  <button id="refreshBtn" class="ghost" title="อัปเดตราคา">↻ ราคา</button>
+</header>
+<main id="view"></main>
+<nav class="tabs">
+  <button data-tab="overview" class="active">ภาพรวม</button>
+  <button data-tab="holdings">สินทรัพย์</button>
+  <button data-tab="txns">รายการ</button>
+  <button data-tab="journal">บันทึก</button>
+  <button data-tab="settings">ตั้งค่า</button>
+</nav>
+<button id="fab" class="fab" title="เพิ่มรายการ">＋</button>
+<dialog id="modal"><form method="dialog" id="modalForm"></form></dialog>
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

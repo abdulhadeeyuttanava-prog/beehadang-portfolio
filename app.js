@@ -64,6 +64,7 @@ function defaultState() {
   };
 }
 
+const APP_VERSION = '1.3';
 let S;
 
 // ---------- helpers ----------
@@ -469,7 +470,7 @@ function settingsView() {
     ${S.assets.map(a => `<div class="row" data-editasset="${a.id}"><span><b>${esc(a.symbol)}</b> <span class="muted">${esc(a.name)}</span></span><span class="chip">${TYPES[a.type]} · ${a.currency}</span></div>`).join('')}
     <div class="actions" style="justify-content:flex-start"><button id="addAsset" class="ghost">เพิ่มสินทรัพย์</button><button id="addAccount" class="ghost">เพิ่มบัญชี</button></div>
     <p class="muted">บัญชี: ${S.accounts.map(a => esc(a.name)).join(', ')}</p></div>
-  <div class="card"><h2>ทั่วไป</h2><label>ชื่อพอร์ต</label><input id="dispName" value="${esc(st.displayName)}">
+  <div class="card"><h2>ทั่วไป <span class="chip">เวอร์ชัน ${APP_VERSION}</span></h2><label>ชื่อพอร์ต</label><input id="dispName" value="${esc(st.displayName)}">
     <div class="actions" style="justify-content:flex-start"><button id="saveSettings">บันทึกการตั้งค่า</button></div></div>`;
 }
 
@@ -691,6 +692,11 @@ $('#refreshBtn').onclick = () => refreshPrices(false);
   render();
   // Daily prices: refresh when the app opens if the last refresh is older than 6 hours.
   if (!S.lastRefresh || Date.now() - new Date(S.lastRefresh) > 6 * 3600e3) refreshPrices(true);
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    // When a new version takes over, reload once so the screen shows it straight away.
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) location.reload(); });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update());
+  }
   if (navigator.storage?.persist) navigator.storage.persist();
 })();

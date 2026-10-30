@@ -1,5 +1,5 @@
 // App-shell cache for offline use.
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {
@@ -17,7 +17,7 @@ self.addEventListener('fetch', e => {
   // Price APIs always go to the network; only our own files are cached.
   if (url.origin !== location.origin) return;
   // Network first so app updates show up on the next open; cache keeps it working offline.
-  e.respondWith(fetch(e.request).then(res => {
+  e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(res => {
     const copy = res.clone();
     caches.open(VERSION).then(c => c.put(e.request, copy));
     return res;

@@ -59,7 +59,7 @@ function defaultState() {
   return {
     version: 1,
     settings: { displayName: "Beehadang's portfolio", finnhubKey: '',
-      targets: { stock: 70, crypto: 15, gold: 5, cash: 10 }, band: 5, concentrationLimit: 25 },
+      targets: { stock: 82, crypto: 18, gold: 0, cash: 0 }, band: 5, concentrationLimit: 25 },
     accounts, assets, txns: [], dca: [], prices: {}, fx: { USD: 33.68, at: null },
   };
 }

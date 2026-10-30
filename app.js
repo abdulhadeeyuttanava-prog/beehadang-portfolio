@@ -64,14 +64,15 @@ function defaultState() {
   };
 }
 
-const APP_VERSION = '1.5';
+const APP_VERSION = '2.0';
 let S;
 
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 2) => Number.isFinite(n) ? n.toLocaleString('th-TH', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–';
-const baht = n => fmt(n, 0) + ' ฿';
+const baht = n => fmt(Math.abs(n) < 0.5 ? 0 : n, 0) + ' ฿';
+const px = n => fmt(n, n != null && Math.abs(n) < 1 ? 6 : 2);
 const pct = n => Number.isFinite(n) ? (n >= 0 ? '+' : '') + fmt(n * 100, 2) + '%' : '–';
 const cls = n => n > 0 ? 'good' : n < 0 ? 'bad' : '';
 const today = () => new Date().toISOString().slice(0, 10);
@@ -306,38 +307,68 @@ function render() {
   bindView();
 }
 
+const COLORS = { stock: '#818cf8', crypto: '#fbbf24', gold: '#f59e0b', cash: '#38bdf8' };
+// Stable per-symbol avatar colour.
+const AVATAR = ['#6366f1', '#a855f7', '#ec4899', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#0ea5e9', '#f43f5e', '#8b5cf6'];
+const BRAND = { BTC: '#f7931a', ETH: '#627eea', XRP: '#23292f', DOT: '#e6007a', ZIL: '#29ccc4', LUNC: '#ffd83d', USDT: '#26a17b', KUB: '#00c66b', TSM: '#c4161c', SPUS: '#1e3a8a', SPWO: '#1e3a8a', GOOG: '#4285f4', CVX: '#0054a4' };
+function avatar(sym) {
+  let h = 0; for (const c of sym) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const bg = BRAND[sym] || AVATAR[h % AVATAR.length];
+  return `<span class="avatar" style="background:${bg}">${esc(sym.slice(0, sym.length > 4 ? 3 : 4))}</span>`;
+}
+const pill = (n, text) => `<span class="pill ${n > 0 ? 'up' : n < 0 ? 'down' : ''}">${n > 0 ? '▲' : n < 0 ? '▼' : ''} ${text}</span>`;
+
 function alertsHtml(hs, alloc) {
   const out = [], T = S.settings.targets, band = S.settings.band;
+  const item = (icon, tone, html, action = '') => `<div class="alert-row"><span class="ico ${tone}">${icon}</span><div class="txt">${html}</div>${action}</div>`;
   if (alloc.total > 0) {
     for (const k of Object.keys(T)) {
       const cur = alloc.by[k] / alloc.total * 100, diff = cur - T[k];
       if (Math.abs(diff) > band)
-        out.push(`<div class="card alert">⚖️ <b>${TYPES[k]}</b> อยู่ที่ ${fmt(cur, 1)}% เป้าหมาย ${T[k]}% (${diff > 0 ? 'เกิน' : 'ขาด'} ${fmt(Math.abs(diff), 1)}%) ควร rebalance</div>`);
+        out.push(item('⚖️', 'warn', `<b>${TYPES[k]}</b> ${fmt(cur, 1)}% · เป้า ${T[k]}%<div class="sub">${diff > 0 ? 'เกิน' : 'ขาด'}เป้า ${fmt(Math.abs(diff), 1)}% ควร rebalance</div>`));
     }
-    const lim = S.settings.concentrationLimit;
-    const bySym = {};
+    const lim = S.settings.concentrationLimit, bySym = {};
     for (const h of hs) if (h.valueThb > 0) bySym[h.asset.symbol] = (bySym[h.asset.symbol] || 0) + h.valueThb;
-    for (const [s, v] of Object.entries(bySym)) {
+    for (const [sym, v] of Object.entries(bySym)) {
       const p = v / alloc.total * 100;
-      if (p > lim && s !== 'DEPOSIT') out.push(`<div class="card alert badc">🎯 <b>${esc(s)}</b> ตัวเดียวคิดเป็น ${fmt(p, 1)}% ของพอร์ต (เกิน ${lim}%)</div>`);
+      if (p > lim && sym !== 'DEPOSIT') out.push(item('🎯', 'bad', `<b>${esc(sym)}</b> คิดเป็น ${fmt(p, 1)}% ของพอร์ต<div class="sub">ตัวเดียวเกิน ${lim}% เสี่ยงกระจุกตัว</div>`));
     }
   }
   const d = new Date(), ym = today().slice(0, 7);
   for (const p of S.dca) {
     const done = S.txns.some(t => t.dcaId === p.id && t.date.startsWith(ym));
-    if (!done && d.getDate() >= p.day) {
-      const a = asset(p.assetId);
-      out.push(`<div class="card alert">📅 ถึงรอบ DCA <b>${esc(a?.symbol)}</b> ${fmt(p.amount, 0)} ${p.currency} <button class="small" data-dca="${p.id}">บันทึกรายการ</button></div>`);
-    }
+    if (!done && d.getDate() >= p.day)
+      out.push(item('📅', 'info', `ถึงรอบ DCA <b>${esc(asset(p.assetId)?.symbol)}</b><div class="sub">${fmt(p.amount, 0)} ${p.currency}</div>`, `<button class="small" data-dca="${p.id}">บันทึก</button>`));
   }
-  if (S.dirty && S.txns.length) out.push(`<div class="card alert">💾 มีข้อมูลใหม่ที่ยังไม่ได้สำรอง <button class="small ghost" data-go="settings">สำรองเลย</button></div>`);
+  if (S.dirty && S.txns.length) out.push(item('💾', 'info', 'มีข้อมูลใหม่ที่ยังไม่ได้สำรอง', `<button class="small ghost" data-go="settings">สำรอง</button>`));
   const due = S.txns.filter(t => t.reviewDate && t.reviewDate <= today() && !t.reviewed);
-  if (due.length) out.push(`<div class="card alert">📝 มี ${due.length} บันทึกถึงวันทบทวน <button class="small ghost" data-go="journal">ดู</button></div>`);
-  return out.join('');
+  if (due.length) out.push(item('📝', 'info', `มี ${due.length} บันทึกถึงวันทบทวน`, `<button class="small ghost" data-go="journal">ดู</button>`));
+  return out.length ? `<section class="card"><h2>สิ่งที่ต้องดู <span class="count">${out.length}</span></h2>${out.join('')}</section>` : '';
+}
+
+function donut(alloc) {
+  const T = S.settings.targets, R = 54, C = 2 * Math.PI * R;
+  let off = 0;
+  const segs = Object.keys(T).filter(k => alloc.by[k] > 0).map(k => {
+    const f = alloc.by[k] / alloc.total, len = f * C;
+    const seg = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${COLORS[k]}" stroke-width="16" stroke-dasharray="${Math.max(len - 2, 0)} ${C}" stroke-dashoffset="${-off}" stroke-linecap="butt"/>`;
+    off += len; return seg;
+  }).join('');
+  let toff = 0;
+  const tsegs = Object.keys(T).filter(k => T[k] > 0).map(k => {
+    const len = T[k] / 100 * 2 * Math.PI * 68;
+    const seg = `<circle r="68" cx="70" cy="70" fill="none" stroke="${COLORS[k]}" stroke-opacity=".45" stroke-width="4" stroke-dasharray="${Math.max(len - 2, 0)} 999" stroke-dashoffset="${-toff}"/>`;
+    toff += len; return seg;
+  }).join('');
+  return `<svg viewBox="0 0 140 140" class="donut"><g transform="rotate(-90 70 70)">
+    <circle r="${R}" cx="70" cy="70" fill="none" stroke="var(--track)" stroke-width="16"/>${segs}${tsegs}</g>
+    <text x="70" y="66" text-anchor="middle" class="d1">${Object.keys(T).filter(k => alloc.by[k] > 0).length}</text>
+    <text x="70" y="84" text-anchor="middle" class="d2">กลุ่มสินทรัพย์</text></svg>`;
 }
 
 function overview() {
-  if (!S.txns.length) return `<div class="card empty"><p>ยังไม่มีรายการ</p><p class="muted">กดปุ่ม ＋ เพื่อบันทึกการซื้อครั้งแรก หรือบันทึกยอดที่ถืออยู่ตอนนี้เป็นรายการซื้อ</p></div>` + alertsHtml([], { total: 0 });
+  if (!S.txns.length) return `<section class="hero"><div class="label">มูลค่าพอร์ต</div><div class="total">0 ฿</div>
+    <div class="hero-sub">เริ่มต้นด้วยการกด ＋ หรือวางข้อมูลในหน้าตั้งค่า</div></section>` + alertsHtml([], { total: 0 });
   const hs = computeHoldings(), alloc = allocation(hs);
   const cost = hs.reduce((s, h) => s + h.costThb, 0);
   const unreal = hs.reduce((s, h) => s + (h.unrealThb || 0), 0);
@@ -346,30 +377,37 @@ function overview() {
   const irr = xirr(portfolioFlows(hs));
   const missing = hs.filter(h => h.qty > 0 && h.price == null).map(h => h.asset.symbol);
   const T = S.settings.targets;
-  const bars = Object.keys(T).map(k => {
-    const cur = alloc.total ? alloc.by[k] / alloc.total * 100 : 0;
-    return `<div style="margin-bottom:10px"><div class="row" style="border:0;padding:0"><span>${TYPES[k]}</span>
-      <span class="muted">${fmt(cur, 1)}% / เป้า ${T[k]}% · ${baht(alloc.by[k])}</span></div>
-      <div class="bar"><i style="width:${Math.min(cur, 100)}%;background:var(--${k})"></i><b style="left:${T[k]}%"></b></div></div>`;
+  const legend = Object.keys(T).filter(k => T[k] > 0 || alloc.by[k] > 0).map(k => {
+    const cur = alloc.total ? alloc.by[k] / alloc.total * 100 : 0, diff = cur - T[k];
+    return `<div class="leg"><span class="dot" style="background:${COLORS[k]}"></span>
+      <div class="leg-main"><div class="leg-top"><span>${TYPES[k]}</span><b>${fmt(cur, 1)}%</b></div>
+      <div class="leg-sub">${baht(alloc.by[k])} · เป้า ${T[k]}% <span class="${Math.abs(diff) > S.settings.band ? 'warn' : 'muted'}">(${diff >= 0 ? '+' : ''}${fmt(diff, 1)})</span></div></div></div>`;
   }).join('');
+  const top = hs.filter(h => h.valueThb > 0).slice(0, 4).map(h => `<div class="mini-row" data-asset="${h.assetId}">${avatar(h.asset.symbol)}
+    <div class="grow"><b>${esc(h.asset.symbol)}</b><div class="wbar"><i style="width:${h.valueThb / alloc.total * 100}%;background:${COLORS[h.asset.type]}"></i></div></div>
+    <div class="r"><b>${baht(h.valueThb)}</b><div class="${cls(h.unrealThb)} small-t">${pct(h.unrealPct)}</div></div></div>`).join('');
   return `
-  <div class="card">
-    <h2>มูลค่าพอร์ตทั้งหมด</h2>
-    <div class="big">${baht(alloc.total)}</div>
-    <div class="muted">ต้นทุน ${baht(cost)} · USD/THB ${fmt(S.fx.USD, 2)}${S.lastRefresh ? ' · อัปเดต ' + new Date(S.lastRefresh).toLocaleString('th-TH') : ''}</div>
-    ${missing.length ? `<div class="muted warn">ยังไม่มีราคา: ${esc(missing.join(', '))}</div>` : ''}
-  </div>
-  <div class="grid2">
-    <div class="card stat"><h2>กำไรที่ยังไม่ขาย</h2><div class="v ${cls(unreal)}">${baht(unreal)}</div><div class="muted">${pct(cost ? unreal / cost : null)}</div></div>
-    <div class="card stat"><h2>XIRR ต่อปี</h2><div class="v ${cls(irr)}">${pct(irr)}</div><div class="muted">${irr == null ? 'ต้องมีข้อมูลอย่างน้อย 3 เดือน' : 'คิดตามจังหวะเงินที่ใส่'}</div></div>
-    <div class="card stat"><h2>กำไรที่ขายแล้ว</h2><div class="v ${cls(realized)}">${baht(realized)}</div></div>
-    <div class="card stat"><h2>ปันผล/ดอกเบี้ยสุทธิ</h2><div class="v good">${baht(income)}</div></div>
+  <section class="hero">
+    <div class="label">มูลค่าพอร์ตทั้งหมด</div>
+    <div class="total">${baht(alloc.total)}</div>
+    <div class="hero-pills">${pill(unreal, `${unreal >= 0 ? '+' : ''}${fmt(unreal, 0)} ฿ · ${pct(cost ? unreal / cost : null)}`)}</div>
+    <div class="hero-sub">ต้นทุน ${baht(cost)} · USD ${fmt(S.fx.USD, 2)} ฿${S.lastRefresh ? ' · ' + new Date(S.lastRefresh).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : ''}</div>
+    ${missing.length ? `<div class="hero-warn">ยังไม่มีราคา: ${esc(missing.join(', '))}</div>` : ''}
+  </section>
+  <div class="tiles">
+    <div class="tile"><span>XIRR ต่อปี</span><b class="${cls(irr)}">${pct(irr)}</b><small>${irr == null ? 'รอข้อมูล 3 เดือน' : 'ตามจังหวะเงินเข้า'}</small></div>
+    <div class="tile"><span>ปันผลสุทธิ</span><b class="good">${baht(income)}</b><small>รวมทั้งหมด</small></div>
+    <div class="tile"><span>กำไรที่ขายแล้ว</span><b class="${cls(realized)}">${baht(realized)}</b><small>realized</small></div>
   </div>
   ${alertsHtml(hs, alloc)}
-  <div class="card"><h2>สัดส่วนเทียบเป้าหมาย</h2>${bars}<div class="muted">เส้นดำ = เป้าหมาย · แจ้งเตือนเมื่อห่างเกิน ±${S.settings.band}%</div></div>
-  <div class="card"><h2>เดือนนี้ควร DCA อะไร</h2>
-    <label>เงินที่จะลงเดือนนี้ (บาท)</label><input id="dcaAmt" type="number" inputmode="decimal" value="${S.settings.lastDcaAmount || 15000}">
-    <div id="dcaOut" style="margin-top:8px"></div></div>
+  <section class="card"><h2>สัดส่วนเทียบเป้าหมาย</h2>
+    <div class="alloc">${donut(alloc)}<div class="legend">${legend}</div></div>
+    <div class="muted center">วงนอกจาง = เป้าหมาย · เตือนเมื่อห่างเกิน ±${S.settings.band}%</div></section>
+  <section class="card"><h2>ถือมากที่สุด <button class="link" data-go="holdings">ทั้งหมด ›</button></h2>${top}</section>
+  <section class="card"><h2>เดือนนี้ควร DCA อะไร</h2>
+    <div class="amt"><input id="dcaAmt" type="number" inputmode="decimal" value="${S.settings.lastDcaAmount || 15000}"><span>บาท</span></div>
+    <div class="quick">${[5000, 10000, 15000, 20000].map(v => `<button class="chipbtn" data-amt="${v}">${fmt(v / 1000, 0)}k</button>`).join('')}</div>
+    <div id="dcaOut"></div></section>
   ${retirementHtml(alloc.total)}`;
 }
 
@@ -380,40 +418,46 @@ function retirementHtml(total) {
   const fvNow = total * Math.pow(1 + i, n);
   const factor = i ? (Math.pow(1 + i, n) - 1) / i : n;
   const monthly = n > 0 ? Math.max(0, (need - fvNow) / factor) : 0;
-  return `<div class="card"><h2>เป้าเกษียณ</h2>
-    <div>ต้องมีพอร์ต <b>${baht(need)}</b> ตอนอายุ ${r.retireAge} เพื่อปันผล ${baht(r.monthlyIncome)}/เดือน (ปันผล ${r.yield}%)</div>
-    <div style="margin-top:6px">ต้องลงทุนเพิ่มประมาณ <b>${baht(monthly)}</b>/เดือน ถ้าผลตอบแทนเฉลี่ย ${r.ret}%/ปี</div>
-    <div class="muted">ตัวเลขโดยประมาณ ยังไม่คิดเงินเฟ้อ · แก้สมมติฐานได้ในตั้งค่า</div></div>`;
+  const prog = need ? Math.min(total / need * 100, 100) : 0;
+  return `<section class="card retire"><h2>เป้าเกษียณ · อายุ ${r.retireAge}</h2>
+    <div class="ret-top"><div><small>เป้าหมาย</small><b>${baht(need)}</b></div><div class="r"><small>ต้องลงเพิ่ม/เดือน</small><b class="accent">${baht(monthly)}</b></div></div>
+    <div class="progress"><i style="width:${Math.max(prog, 1)}%"></i></div>
+    <div class="muted">ตอนนี้ ${fmt(prog, 2)}% ของเป้า · ปันผล ${baht(r.monthlyIncome)}/เดือน ที่ yield ${r.yield}% · ผลตอบแทนคาด ${r.ret}%/ปี (ยังไม่คิดเงินเฟ้อ)</div></section>`;
 }
 
 function holdingsView() {
   const hs = computeHoldings().filter(h => h.qty > 1e-12);
   if (!hs.length) return `<div class="card empty">ยังไม่มีสินทรัพย์ที่ถืออยู่</div>`;
   const total = hs.reduce((s, h) => s + (h.valueThb || 0), 0);
-  const groups = Object.keys(TYPES).map(k => {
+  return Object.keys(TYPES).map(k => {
     const g = hs.filter(h => h.asset.type === k);
     if (!g.length) return '';
-    return `<div class="card"><h2>${TYPES[k]}</h2>${g.map(h => {
-      const accs = Object.entries(h.byAccount).filter(([, q]) => q > 1e-12).map(([id]) => account(id)?.name).filter(Boolean).join(', ');
+    const sub = g.reduce((s, h) => s + (h.valueThb || 0), 0);
+    return `<section class="card"><h2><span><span class="dot" style="background:${COLORS[k]}"></span> ${TYPES[k]}</span><span class="muted">${baht(sub)}</span></h2>${g.map(h => {
+      const accs = Object.entries(h.byAccount).filter(([, q]) => q > 1e-12).map(([id]) => account(id)?.name).filter(Boolean).join(' · ');
       const ir = xirr(portfolioFlows(hs, h.assetId));
-      return `<div class="row" data-asset="${h.assetId}">
-        <div><b>${esc(h.asset.symbol)}</b> <span class="chip">${total ? fmt((h.valueThb || 0) / total * 100, 1) : 0}%</span>
-          <div class="muted">${fmt(h.qty, h.qty < 10 ? 6 : 2)} หน่วย · ${esc(accs)}</div>
-          <div class="muted">ต้นทุนเฉลี่ย ${fmt(h.qty ? (h.asset.currency === 'THB' ? h.costThb : h.costCur) / h.qty : 0, 2)} ${h.asset.currency} · ราคา ${h.price == null ? '–' : fmt(h.price, 2)}${S.prices[h.assetId]?.at ? ' · ' + new Date(S.prices[h.assetId].at).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}</div></div>
-        <div class="r"><b>${h.valueThb == null ? '–' : baht(h.valueThb)}</b>
-          <div class="${cls(h.unrealThb)}">${h.unrealThb == null ? '' : baht(h.unrealThb) + ' (' + pct(h.unrealPct) + ')'}</div>
-          ${h.unrealCur != null ? `<div class="muted">${fmt(h.unrealCur, 2)} USD · ค่าเงิน ${baht(h.fxEffectThb)}</div>` : ''}
-          ${ir != null ? `<div class="muted">XIRR ${pct(ir)}</div>` : ''}
-          ${h.incomeThb ? `<div class="muted">ปันผล ${baht(h.incomeThb)}</div>` : ''}</div></div>`;
-    }).join('')}</div>`;
-  }).join('');
-  return groups + `<p class="muted">แตะสินทรัพย์ที่เป็นราคาตั้งเอง (เช่น ทอง) เพื่อใส่ราคาล่าสุด</p>`;
+      const w = total ? (h.valueThb || 0) / total * 100 : 0;
+      const at = S.prices[h.assetId]?.at ? new Date(S.prices[h.assetId].at).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+      return `<div class="hold" data-asset="${h.assetId}">
+        <div class="hold-top">${avatar(h.asset.symbol)}
+          <div class="grow"><b>${esc(h.asset.symbol)}</b> <span class="chip">${fmt(w, 1)}%</span><div class="sub">${fmt(h.qty, h.qty < 10 ? 6 : 2)} หน่วย · ${esc(accs)}</div></div>
+          <div class="r"><b>${h.valueThb == null ? '–' : baht(h.valueThb)}</b><div>${h.unrealThb == null ? '' : pill(h.unrealThb, pct(h.unrealPct))}</div></div></div>
+        <div class="hold-meta">
+          <span>ทุน ${px(h.qty ? (h.asset.currency === 'THB' ? h.costThb : h.costCur) / h.qty : 0)} ${h.asset.currency}</span>
+          <span>ราคา ${h.price == null ? '–' : px(h.price)}</span>
+          <span class="${cls(h.unrealThb)}">${h.unrealThb == null ? '' : (h.unrealThb >= 0 ? '+' : '') + baht(h.unrealThb)}</span>
+          ${h.unrealCur != null ? `<span>${h.unrealCur >= 0 ? '+' : ''}${fmt(h.unrealCur, 2)} USD · ค่าเงิน ${baht(h.fxEffectThb)}</span>` : ''}
+          ${ir != null ? `<span>XIRR ${pct(ir)}</span>` : ''}${h.incomeThb ? `<span>ปันผล ${baht(h.incomeThb)}</span>` : ''}
+          ${at ? `<span class="muted">ราคา ณ ${at}</span>` : ''}</div>
+        <div class="wbar"><i style="width:${w}%;background:${COLORS[k]}"></i></div></div>`;
+    }).join('')}</section>`;
+  }).join('') + `<p class="muted center">แตะสินทรัพย์เพื่อแก้ไขหรือใส่ราคาเอง</p>`;
 }
 
 function txnLine(t) {
   const a = asset(t.assetId), fx = t.fx || 1;
   const amt = t.type === 'buy' || t.type === 'sell' ? t.qty * t.price : t.amount;
-  return `<div class="row" data-txn="${t.id}"><div><b>${TX[t.type]} ${esc(a?.symbol)}</b>
+  return `<div class="row" data-txn="${t.id}">${avatar(a?.symbol || '?')}<div class="grow"><b>${TX[t.type]} ${esc(a?.symbol)}</b>
     <div class="muted">${t.date} · ${esc(account(t.accountId)?.name || '')}${t.type === 'buy' || t.type === 'sell' ? ` · ${fmt(t.qty, 6)} @ ${fmt(t.price, 2)}` : ''}</div>
     ${t.reason ? `<div class="muted">“${esc(t.reason.slice(0, 80))}”</div>` : ''}</div>
     <div class="r">${fmt(amt, 2)} ${t.currency}${t.currency !== 'THB' ? `<div class="muted">${baht(amt * fx)}</div>` : ''}</div></div>`;
@@ -637,10 +681,12 @@ function bindView() {
   if (amt) {
     const show = () => {
       const n = Number(amt.value) || 0, s = dcaSuggestion(n, allocation(computeHoldings()));
-      $('#dcaOut').innerHTML = Object.keys(s).filter(k => s[k] >= 1).map(k => `<div class="row"><span>${TYPES[k]}</span><b>${baht(s[k])}</b></div>`).join('')
-        + '<div class="muted">แบ่งให้กลุ่มที่ต่ำกว่าเป้าก่อน โดยไม่ต้องขายของเดิม</div>';
+      $('#dcaOut').innerHTML = Object.keys(s).filter(k => s[k] >= 1).map(k => `<div class="split"><span class="dot" style="background:${COLORS[k]}"></span><span class="grow">${TYPES[k]}</span><b>${baht(s[k])}</b></div>
+        <div class="wbar"><i style="width:${n ? s[k] / n * 100 : 0}%;background:${COLORS[k]}"></i></div>`).join('')
+        + '<div class="muted">แบ่งให้กลุ่มที่ต่ำกว่าเป้าก่อน ไม่ต้องขายของเดิม</div>';
     };
     amt.oninput = () => { S.settings.lastDcaAmount = Number(amt.value) || 0; saveState(); show(); };
+    v.querySelectorAll('[data-amt]').forEach(b => b.onclick = () => { amt.value = b.dataset.amt; amt.oninput(); });
     show();
   }
 

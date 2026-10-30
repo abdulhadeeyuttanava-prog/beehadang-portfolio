@@ -1,5 +1,5 @@
 // App-shell cache for offline use.
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => {

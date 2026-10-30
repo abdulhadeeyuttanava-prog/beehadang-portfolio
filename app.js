@@ -64,7 +64,7 @@ function defaultState() {
   };
 }
 
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 let S;
 
 // ---------- helpers ----------
@@ -282,15 +282,15 @@ async function importStarter(j) {
   toast(`นำเข้าแล้ว ${added} รายการ${skipped ? ` (ข้าม ${skipped} ที่เคยนำเข้าแล้ว)` : ''}`);
 }
 
-// "account,symbol,qty,price[,currency]" per line → starter rows dated today.
+// "account,symbol,qty,price[,currency[,market price]]" per line → starter rows dated today.
 function parsePasted(text) {
   const txns = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map((l, i) => {
-    const [account, symbol, qty, price, currency = 'THB'] = l.split(',').map(x => x.trim());
+    const [account, symbol, qty, price, currency = 'THB', market] = l.split(',').map(x => x.trim());
     const q = Number(qty), p = Number(price);
     if (!account || !symbol || !(q > 0) || !(p >= 0)) throw new Error(`บรรทัด ${i + 1}`);
     const sym = symbol.toUpperCase(), cur = currency.toUpperCase();
     return { date: today(), account, symbol: sym, qty: q, price: p, currency: cur, fx: fxNow(cur),
-      assetType: sym === 'DEPOSIT' ? 'cash' : undefined, marketPrice: p, reason: 'ยอดยกมา (วางจากข้อความ)' };
+      assetType: sym === 'DEPOSIT' ? 'cash' : undefined, marketPrice: market ? Number(market) : p, reason: 'ยอดยกมา (วางจากข้อความ)' };
   });
   return { starter: 1, title: 'ข้อความที่วาง', txns };
 }
